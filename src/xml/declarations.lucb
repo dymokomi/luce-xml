@@ -1,0 +1,283 @@
+#==============================================================================================
+#
+#   xml/declarations - ENTITY, ATTLIST, ELEMENT and NOTATION declarations
+#
+#   DESCRIPTION:
+#       The markup declarations of the DTD (§3.2, §3.3, §4.2, §4.7). Each is checked
+#       against its grammar in full; what a non-validating parser needs is kept: entities
+#       (their replacement texts built as §4.5 says), attribute types and defaults, and
+#       notations. Element declarations are checked and dropped. The first declaration of
+#       an entity or of an element's attribute binds; later ones are ignored.
+#
+#==============================================================================================
+
+# mark: Entities ==============================================================================
+
+## An entity declaration ([70]), `<!ENTITY` at the position.
+func read_entity_declaration(reader: Reader*) -> !:
+    let floor = reader.top()
+    reader.advance(8)
+    try require_space(reader, floor, "the entity's name")
+    var parameter = false
+    if reader.peek() == '%':
+        reader.advance(1)
+        try require_space(reader, floor, "the parameter entity's name")
+        parameter = true
+    let name = try expect_name(reader, "the entity's name")
+    if reader.options.namespaces and strings_contain(name, ':'):
+        error(malformed, try reader.complain(f"the entity name '{name}' contains a colon"))
+    try require_space(reader, floor, "the entity's value")
+    var entity = Entity(name = name, parameter = parameter, outside = reader.top() > 0)
+    let quote = reader.peek()
+    if quote == '"' or quote == '\'':
+        entity.value = try read_entity_value(reader)
+    elif reader.looking_at("SYSTEM") or reader.looking_at("PUBLIC"):
+        let (public_id, system_id) = try read_external_id(reader, floor, false)
+        entity.external = true
+        entity.public_id = public_id
+        entity.system_id = system_id else ""
+        entity.base = external_base(reader)
+        let spaced = try dtd_space(reader, floor)
+        if reader.looking_at("NDATA"):
+            if parameter:
+                error(malformed, try reader.complain("a parameter entity cannot be unparsed (NDATA)"))
+            if not spaced:
+                error(malformed, try reader.complain("expected white space before NDATA"))
+            reader.advance(5)
+            try require_space(reader, floor, "the notation's name")
+            entity.notation = try expect_name(reader, "the notation's name")
+    else:
+        error(malformed, try reader.complain(f"expected the value or external identifier of the entity '{name}'"))
+    try end_declaration(reader, floor, "entity")
+    if not processing(reader):
+        return
+    var table = &reader.parameters if parameter else &reader.general
+    if table.find(name) != none:
+        return
+    try table.insert(name, (u32)reader.entities.used)
+    try reader.entities.push(entity)
+
+## The system identifier of the external entity the reader is in ("" for the document).
+func external_base(reader: const Reader*) -> str:
+    var index = reader.frames.used
+    while index > 0:
+        index -= 1
+        if reader.frames.items[index].external:
+            return reader.frames.items[index].system_id
+    return ""
+
+## An entity's quoted value ([9]) at the position; answers its replacement text (§4.5):
+## character references and parameter entities replaced, general entity references
+## left as they are.
+func read_entity_value(reader: Reader*) -> str!:
+    let quote = reader.peek()
+    reader.advance(1)
+    reader.literal.clear()
+    try read_entity_value_text(reader, quote)
+    return try reader.arena.store(reader.literal.items[..<reader.literal.used])
+
+## The text of an entity value from the top frame into `Reader.literal`, up to `quote`,
+## or to the frame's end (a parameter entity's text) when `quote` is 0.
+func read_entity_value_text(reader: Reader*, quote: u8) -> !:
+    while true:
+        if reader.at_end():
+            if quote == 0:
+                return
+            error(malformed, try reader.complain("the entity's value is not closed"))
+        let byte = reader.peek()
+        if byte == quote:
+            reader.advance(1)
+            return
+        if byte == '%':
+            if not reader.frames.items[reader.top()].in_external:
+                error(malformed, try reader.complain("a parameter-entity reference cannot stand in an entity value in the internal subset"))
+            if try enter_parameter(reader):
+                try read_entity_value_text(reader, 0)
+                end_parameter_entity(reader)
+        elif byte == '&':
+            if reader.peek_at(1) == '#':
+                try reader.literal.add_scalar(try read_char_reference(reader))
+            else:
+                let start = reader.position()
+                discard(try read_entity_name(reader))
+                try reader.literal.add_all(reader.since(start).bytes)
+        else:
+            try reader.literal.add(byte)
+            reader.advance(1)
+
+# mark: Attribute lists =======================================================================
+
+## An attribute-list declaration ([52]), `<!ATTLIST` at the position.
+func read_attribute_list(reader: Reader*) -> !:
+    let floor = reader.top()
+    reader.advance(9)
+    try require_space(reader, floor, "the element's name")
+    let element = try expect_name(reader, "the element's name")
+    while true:
+        let spaced = try dtd_space(reader, floor)
+        if reader.accept(">"):
+            return
+        if not spaced:
+            error(malformed, try reader.complain("expected white space before the attribute's definition"))
+        let name = try expect_name(reader, "an attribute name or '>'")
+        try require_space(reader, floor, "the attribute's type")
+        let cdata = try read_attribute_type(reader, floor)
+        try require_space(reader, floor, "the attribute's default")
+        var value: str? = none
+        if reader.accept("#REQUIRED") or reader.accept("#IMPLIED"):
+            value = none
+        else:
+            if reader.accept("#FIXED"):
+                try require_space(reader, floor, "the fixed value")
+            value = try read_default_value(reader, name, cdata)
+        if processing(reader):
+            try declare_attribute(reader, element, AttributeDecl(name = name, cdata = cdata, value = value))
+
+## An attribute type ([54]); answers whether it is CDATA.
+func read_attribute_type(reader: Reader*, floor: usize) -> bool!:
+    if reader.accept("CDATA"):
+        return true
+    for keyword in ["IDREFS", "IDREF", "ID", "ENTITIES", "ENTITY", "NMTOKENS", "NMTOKEN"]:
+        if reader.accept(keyword):
+            return false
+    var notation = false
+    if reader.accept("NOTATION"):
+        try require_space(reader, floor, "the notation names")
+        notation = true
+    if not reader.accept("("):
+        error(malformed, try reader.complain("expected an attribute type"))
+    while true:
+        discard(try dtd_space(reader, floor))
+        let token = reader.scan_name() if notation else reader.scan_nmtoken()
+        if token.length == 0:
+            error(malformed, try reader.complain("expected a name in the enumeration"))
+        discard(try dtd_space(reader, floor))
+        if reader.accept(")"):
+            return false
+        if not reader.accept("|"):
+            error(malformed, try reader.complain("expected '|' or ')' in the enumeration"))
+
+## An attribute's default value ([10]), normalised as a value of its type, kept in the
+## arena.
+func read_default_value(reader: Reader*, name: str, cdata: bool) -> str!:
+    let quote = reader.peek()
+    if quote != '"' and quote != '\'':
+        error(malformed, try reader.complain(f"expected #REQUIRED, #IMPLIED or a quoted default for '{name}'"))
+    reader.advance(1)
+    reader.values.clear()
+    try read_value_text(reader, quote, name)
+    var value = reader.values.view()
+    if not cdata:
+        value = try collapse_text(reader, value)
+    return try reader.arena.store(value.bytes)
+
+## Add `declared` to `element`'s attributes, unless the element has it already.
+func declare_attribute(reader: Reader*, element: str, declared: AttributeDecl) -> !:
+    let index = (u32)reader.declared.used
+    let found = reader.element_types.find(element)
+    if found == none:
+        try reader.element_types.insert(element, (u32)reader.attribute_lists.used)
+        try reader.attribute_lists.push(AttributeList(first = index + 1, last = index + 1))
+        try reader.declared.push(declared)
+        return
+    let list = &reader.attribute_lists.items[(usize)(found else 0)]
+    var link = list.first
+    while link != 0:
+        if reader.declared.items[link - 1].name == declared.name:
+            return
+        link = reader.declared.items[link - 1].next
+    reader.declared.items[list.last - 1].next = index + 1
+    list.last = index + 1
+    try reader.declared.push(declared)
+
+# mark: Element types =========================================================================
+
+## An element type declaration ([45]), `<!ELEMENT` at the position; checked, not kept.
+func read_element_declaration(reader: Reader*) -> !:
+    let floor = reader.top()
+    reader.advance(9)
+    try require_space(reader, floor, "the element's name")
+    discard(try expect_name(reader, "the element's name"))
+    try require_space(reader, floor, "the content specification")
+    if reader.accept("EMPTY") or reader.accept("ANY"):
+        try end_declaration(reader, floor, "element")
+        return
+    if not reader.accept("("):
+        error(malformed, try reader.complain("expected EMPTY, ANY or a content model in '('"))
+    discard(try dtd_space(reader, floor))
+    if reader.accept("#PCDATA"):
+        try read_mixed(reader, floor)
+    else:
+        try read_group(reader, floor, 1)
+    try end_declaration(reader, floor, "element")
+
+## The rest of mixed content ([51]) after `(#PCDATA`.
+func read_mixed(reader: Reader*, floor: usize) -> !:
+    var names = false
+    while true:
+        discard(try dtd_space(reader, floor))
+        if reader.accept(")"):
+            if names and not reader.accept("*"):
+                error(malformed, try reader.complain("mixed content with element names must end with ')*'"))
+            if not names:
+                discard(reader.accept("*"))
+            return
+        if not reader.accept("|"):
+            error(malformed, try reader.complain("expected '|' or ')' in mixed content"))
+        discard(try dtd_space(reader, floor))
+        discard(try expect_name(reader, "an element name"))
+        names = true
+
+## The rest of a choice or sequence ([49], [50]) after its `(`; `depth` counts groups.
+func read_group(reader: Reader*, floor: usize, depth: usize) -> !:
+    if depth > reader.options.max_depth:
+        error(limit, try reader.report(limit, "the content model nests too deeply"))
+    try read_particle(reader, floor, depth)
+    var separator: u8 = 0
+    while true:
+        discard(try dtd_space(reader, floor))
+        if reader.accept(")"):
+            break
+        let byte = reader.peek()
+        if byte != '|' and byte != ',':
+            error(malformed, try reader.complain("expected '|', ',' or ')' in the content model"))
+        if separator != 0 and separator != byte:
+            error(malformed, try reader.complain("a content model group cannot mix '|' and ','"))
+        separator = byte
+        reader.advance(1)
+        discard(try dtd_space(reader, floor))
+        try read_particle(reader, floor, depth)
+    read_occurrence(reader)
+
+## A content particle ([48]): a name or a group, with its occurrence.
+func read_particle(reader: Reader*, floor: usize, depth: usize) -> !:
+    if reader.accept("("):
+        discard(try dtd_space(reader, floor))
+        try read_group(reader, floor, depth + 1)
+        return
+    discard(try expect_name(reader, "an element name or '(' in the content model"))
+    read_occurrence(reader)
+
+## `?`, `*` or `+` after a particle, if there.
+func read_occurrence(reader: Reader*):
+    let byte = reader.peek()
+    if byte == '?' or byte == '*' or byte == '+':
+        reader.advance(1)
+
+# mark: Notations =============================================================================
+
+## A notation declaration ([82]), `<!NOTATION` at the position.
+func read_notation(reader: Reader*) -> !:
+    let floor = reader.top()
+    reader.advance(10)
+    try require_space(reader, floor, "the notation's name")
+    let name = try expect_name(reader, "the notation's name")
+    if reader.options.namespaces and strings_contain(name, ':'):
+        error(malformed, try reader.complain(f"the notation name '{name}' contains a colon"))
+    try require_space(reader, floor, "the notation's identifier")
+    let (public_id, system_id) = try read_external_id(reader, floor, true)
+    try end_declaration(reader, floor, "notation")
+    for known in reader.notations.view():
+        if known.name == name:
+            return
+    try reader.notations.push(Notation(name = name, public_id = public_id, system_id = system_id))

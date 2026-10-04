@@ -1,0 +1,255 @@
+#==============================================================================================
+#
+#   xml/decode - Encodings: byte order marks, UTF-16, Latin-1 and the encoding declaration
+#
+#   DESCRIPTION:
+#       Every entity, the document included, becomes UTF-8 text before it is parsed: its
+#       encoding is found from a byte order mark or the encoding its XML or text
+#       declaration names (XML 1.0 §4.3.3 and Appendix F), the bytes are decoded, and
+#       the result is checked to hold only XML characters, with every CR LF pair and
+#       lone CR made a single LF (§2.11). UTF-8 text needing none of that stays a view of
+#       the caller's bytes. UTF-16 (with a byte order mark, or labelled UTF-16LE or
+#       UTF-16BE), ISO-8859-1 and US-ASCII are decoded here; any other encoding stops the
+#       parse with `unsupported_encoding`, naming it, for a caller that can decode it.
+#
+#==============================================================================================
+
+## The encoding a byte order mark or the first bytes of an entity show.
+enum Encoding:
+    utf8
+    utf16le
+    utf16be
+
+## Decode an entity's bytes to normalised UTF-8. `document` for the document itself;
+## `system_id` names an external entity in errors.
+func decode_entity(reader: Reader*, source: const u8[], document: bool, system_id: str) -> str!:
+    var encoding = Encoding.utf8
+    var bom: usize = 0
+    if source.length >= 3 and source[0] == 0xEF and source[1] == 0xBB and source[2] == 0xBF:
+        bom = 3
+    elif source.length >= 2 and source[0] == 0xFE and source[1] == 0xFF:
+        encoding = Encoding.utf16be
+        bom = 2
+    elif source.length >= 2 and source[0] == 0xFF and source[1] == 0xFE:
+        encoding = Encoding.utf16le
+        bom = 2
+    if document and reader.options.assume_utf8:
+        if encoding != Encoding.utf8:
+            bom = 0
+        reader.origin = bom
+        return try normalize(reader, (str)source[bom..], document, system_id)
+    if bom == 0 and source.length >= 4:
+        if source[0] == 0 and source[1] == '<' and source[2] == 0 and source[3] == '?':
+            encoding = Encoding.utf16be
+        elif source[0] == '<' and source[1] == 0 and source[2] == '?' and source[3] == 0:
+            encoding = Encoding.utf16le
+        elif source[0] == 0 and source[1] == 0:
+            try fail_encoding(reader, "UCS-4", system_id)
+        elif source[0] == 0x4C and source[1] == 0x6F and source[2] == 0xA7 and source[3] == 0x94:
+            try fail_encoding(reader, "EBCDIC", system_id)
+    var text: str = ""
+    if encoding == Encoding.utf16le or encoding == Encoding.utf16be:
+        text = try decode_utf16(reader, source[bom..], encoding == Encoding.utf16le, system_id)
+        let label = declared_label(text.bytes)
+        let endian = "UTF-16LE" if encoding == Encoding.utf16le else "UTF-16BE"
+        if label.length == 0:
+            if bom == 0:
+                error(malformed, try at_start(reader, text, system_id, "a UTF-16 entity must begin with a byte order mark"))
+        elif bom > 0:
+            if not (same_label(label, "UTF-16") or same_label(label, endian) or same_label(label, "ISO-10646-UCS-2")):
+                error(malformed, try at_start(reader, text, system_id, f"the entity is in UTF-16 but declares the encoding {label}"))
+        elif same_label(label, "UTF-16"):
+            error(malformed, try at_start(reader, text, system_id, "a UTF-16 entity must begin with a byte order mark"))
+        elif not same_label(label, endian):
+            error(malformed, try at_start(reader, text, system_id, f"the entity is in UTF-16 but declares the encoding {label}"))
+    else:
+        let label = declared_label(source[bom..])
+        if label.length == 0 or same_label(label, "UTF-8"):
+            text = (str)source[bom..]
+            if document:
+                reader.origin = bom
+        elif bom > 0:
+            error(malformed, try at_start(reader, (str)source[bom..], system_id, f"the entity begins with a UTF-8 byte order mark but declares the encoding {label}"))
+        elif same_label(label, "UTF-16") or same_label(label, "UTF-16LE") or same_label(label, "UTF-16BE"):
+            error(malformed, try at_start(reader, (str)source, system_id, f"the entity declares the encoding {label} but is not in UTF-16"))
+        elif is_latin1(label):
+            text = try decode_latin1(reader, source)
+        elif is_ascii(label):
+            for (index, byte) in source.indexed():
+                if byte >= 0x80:
+                    try push_raw(reader, (str)source[..<index], system_id)
+                    error(malformed, try reader.complain(f"the byte {byte} is not US-ASCII, the encoding the entity declares"))
+            text = (str)source
+        else:
+            try check_declaration(reader, source, document, system_id)
+            try fail_encoding(reader, label, system_id)
+    return try normalize(reader, text, document, system_id)
+
+## Read the XML or text declaration at the start of `data` strictly, before an encoding it
+## names is reported unsupported, so a malformed declaration is reported as that.
+func check_declaration(reader: Reader*, data: const u8[], document: bool, system_id: str) -> !:
+    var end: usize = 0
+    while end + 1 < data.length and not (data[end] == '?' and data[end + 1] == '>'):
+        if data[end] >= 0x80:
+            return
+        end += 1
+    try reader.frames.push(Frame(text = (str)data[..<end + 2 if end + 2 <= data.length else data.length],
+                                 external = system_id.length > 0, system_id = system_id))
+    try read_xml_declaration(reader, document)
+    reader.frames.used -= 1
+
+## Stop with `unsupported_encoding` for `label`.
+func fail_encoding(reader: Reader*, label: str, system_id: str) -> !:
+    try push_raw(reader, "", system_id)
+    error(unsupported_encoding, try reader.report(unsupported_encoding, f"the encoding {label} is not supported", encoding = label))
+
+## Push a frame over `text` (an entity not yet decoded in full) for an error's position.
+func push_raw(reader: Reader*, text: str, system_id: str) -> !:
+    try reader.frames.push(Frame(text = text, pos = text.length, external = system_id.length > 0, system_id = system_id))
+
+## Record an error at the start of `text` and answer its message.
+func at_start(reader: Reader*, text: str, system_id: str, message: fmt) -> str!:
+    try reader.frames.push(Frame(text = text, external = system_id.length > 0, system_id = system_id))
+    return try reader.complain(message)
+
+# mark: Decoders ==============================================================================
+
+## UTF-16 `data` as UTF-8 in the reader's arena.
+func decode_utf16(reader: Reader*, data: const u8[], little: bool, system_id: str) -> str!:
+    var built = &reader.scratch
+    built.clear()
+    var index: usize = 0
+    while index + 1 < data.length:
+        var code = (u32)data[index + 1] | ((u32)data[index] << 8)
+        if little:
+            code = (u32)data[index] | ((u32)data[index + 1] << 8)
+        index += 2
+        if code >= 0xD800 and code <= 0xDBFF and index + 1 < data.length:
+            var low = (u32)data[index + 1] | ((u32)data[index] << 8)
+            if little:
+                low = (u32)data[index] | ((u32)data[index + 1] << 8)
+            if low >= 0xDC00 and low <= 0xDFFF:
+                index += 2
+                try built.add_scalar(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00))
+                continue
+        if code >= 0xD800 and code <= 0xDFFF:
+            let partial = try reader.arena.store(built.items[..<built.used])
+            try push_raw(reader, partial, system_id)
+            error(malformed, try reader.complain("an unpaired UTF-16 surrogate"))
+        try built.add_scalar(code)
+    if index < data.length:
+        let partial = try reader.arena.store(built.items[..<built.used])
+        try push_raw(reader, partial, system_id)
+        error(malformed, try reader.complain("the UTF-16 text ends in half a character"))
+    return try reader.arena.store(built.items[..<built.used])
+
+## ISO-8859-1 `data` as UTF-8 in the reader's arena.
+func decode_latin1(reader: Reader*, data: const u8[]) -> str!:
+    var built = &reader.scratch
+    built.clear()
+    for byte in data:
+        try built.add_scalar((u32)byte)
+    return try reader.arena.store(built.items[..<built.used])
+
+## Check that UTF-8 `text` is valid and holds only XML characters, and normalise its line
+## ends; the result is `text` itself when nothing changes.
+func normalize(reader: Reader*, text: str, document: bool, system_id: str) -> str!:
+    let data = text.bytes
+    var carriage = false
+    var index: usize = 0
+    while index < data.length:
+        let byte = data[index]
+        if byte < 0x80:
+            if byte < 0x20 and byte != '\t' and byte != '\n' and byte != '\r':
+                try push_raw(reader, (str)data[..<index], system_id)
+                error(malformed, try reader.complain(f"the control character #x{hex(byte)} is not allowed in XML"))
+            carriage = carriage or byte == '\r'
+            index += 1
+            continue
+        let size = utf8_length(data, index)
+        if size == 0:
+            try push_raw(reader, (str)data[..<index], system_id)
+            error(malformed, try reader.complain("the text is not valid UTF-8"))
+        let (scalar, _) = decode_utf8(data, index)
+        if not is_char(scalar):
+            try push_raw(reader, (str)data[..<index], system_id)
+            error(malformed, try reader.complain(f"the character #x{hex(scalar)} is not allowed in XML"))
+        index += size
+    if not carriage:
+        return text
+    let target = try reader.arena.reserve(data.length)
+    var written: usize = 0
+    index = 0
+    while index < data.length:
+        let byte = data[index]
+        index += 1
+        if byte == '\r':
+            target[written] = '\n'
+            written += 1
+            if index < data.length and data[index] == '\n':
+                index += 1
+                if document:
+                    try reader.collapsed.push(written)
+            continue
+        target[written] = byte
+        written += 1
+    return (str)target[..<written]
+
+# mark: Encoding names ========================================================================
+
+## The encoding an XML or text declaration at the start of `data` names, or "".
+func declared_label(data: const u8[]) -> str:
+    if data.length < 6 or not ((str)data[..<5] == "<?xml") or not is_space(data[5]):
+        return ""
+    var index: usize = 5
+    let end = data.length if data.length < 512 else 512
+    while index + 8 < end:
+        if data[index] == '?' and data[index + 1] == '>':
+            return ""
+        if (str)data[index..<index + 8] == "encoding":
+            index += 8
+            while index < end and is_space(data[index]):
+                index += 1
+            if index >= end or data[index] != '=':
+                return ""
+            index += 1
+            while index < end and is_space(data[index]):
+                index += 1
+            if index >= end or (data[index] != '"' and data[index] != '\''):
+                return ""
+            let quote = data[index]
+            let start = index + 1
+            index = start
+            while index < end and data[index] != quote:
+                if data[index] >= 0x80:
+                    return ""
+                index += 1
+            return (str)data[start..<index] if index < end else ""
+        index += 1
+    return ""
+
+## Whether encoding names `label` and `expected` are the same, ignoring case.
+func same_label(label: str, expected: str) -> bool:
+    if label.length != expected.length:
+        return false
+    for index in 0..<label.length:
+        if lower(label.bytes[index]) != lower(expected.bytes[index]):
+            return false
+    return true
+
+func lower(byte: u8) -> u8:
+    return byte + 32 if byte >= 'A' and byte <= 'Z' else byte
+
+## Whether `label` names ISO-8859-1.
+func is_latin1(label: str) -> bool:
+    for known in ["ISO-8859-1", "ISO_8859-1", "ISO_8859-1:1987", "latin1", "l1", "ISO-IR-100", "CP819", "IBM819", "csISOLatin1"]:
+        if same_label(label, known):
+            return true
+    return false
+
+## Whether `label` names US-ASCII.
+func is_ascii(label: str) -> bool:
+    for known in ["US-ASCII", "ASCII", "ISO646-US", "ANSI_X3.4-1968", "csASCII", "us", "IBM367", "cp367"]:
+        if same_label(label, known):
+            return true
+    return false

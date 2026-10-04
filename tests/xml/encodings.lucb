@@ -1,0 +1,65 @@
+#==============================================================================================
+#
+#   tests/xml/encodings - Byte order marks, UTF-16, Latin-1 and unsupported encodings
+#
+#==============================================================================================
+
+## Expect `bytes` to record `expected`.
+func expect_bytes(bytes: const u8[], expected: str, options: Options = Options()) -> !:
+    var recorder = Recorder()
+    defer recorder.release()
+    var parser = Parser(options = options)
+    defer parser.release()
+    parser.parse(bytes, &recorder) catch failure:
+        print(f"failed: {failure.message}")
+        trap("the parse failed")
+    if recorder.out.view() != expected:
+        print(f"expected: {expected}\nactual:   {recorder.out.view()}")
+        trap("the record differs")
+
+test "UTF-8 with a byte order mark":
+    try expect_bytes(b"\xEF\xBB\xBF<a>\xC3\xA9</a>", "<a>\u{E9}</a>")
+
+test "UTF-16 in both byte orders":
+    try expect_bytes(b"\xFF\xFE<\x00a\x00>\x00\xE9\x00<\x00/\x00a\x00>\x00", "<a>\u{E9}</a>")
+    try expect_bytes(b"\xFE\xFF\x00<\x00a\x00>\xD8\x3D\xDE\x00\x00<\x00/\x00a\x00>", "<a>\u{1F600}</a>")
+
+test "ISO-8859-1 and US-ASCII are decoded":
+    try expect_bytes(b"<?xml version='1.0' encoding='ISO-8859-1'?><a>\xE9</a>", "<a>\u{E9}</a>")
+    try expect_bytes(b"<?xml version='1.0' encoding='us-ascii'?><a>x</a>", "<a>x</a>")
+
+test "another encoding is reported to the caller":
+    var parser = Parser()
+    defer parser.release()
+    var checker = Checker()
+    var code = malformed
+    parser.parse("<?xml version='1.0' encoding='Shift_JIS'?><a/>".bytes, &checker) catch failure:
+        code = failure.code
+    assert(code == unsupported_encoding)
+    let found = parser.failure else trap("no failure")
+    assert(found.encoding == "Shift_JIS")
+
+test "a caller that decoded the document says so":
+    var options = Options()
+    options.assume_utf8 = true
+    try expect_bytes("<?xml version='1.0' encoding='Shift_JIS'?><a>\u{3042}</a>".bytes, "<a>\u{3042}</a>", options)
+
+test "encoding mismatches are errors":
+    try expect_failure("<?xml version='1.0' encoding='UTF-16'?><a/>", "not in UTF-16")
+    var recorder = Recorder()
+    defer recorder.release()
+    var parser = Parser()
+    defer parser.release()
+    var failed = false
+    parser.parse(b"\xEF\xBB\xBF<?xml version='1.0' encoding='ISO-8859-1'?><a/>", &recorder) catch failure:
+        failed = failure.code == malformed
+    assert(failed)
+
+test "bad UTF-16 is an error":
+    var parser = Parser()
+    defer parser.release()
+    var checker = Checker()
+    var failed = false
+    parser.parse(b"\xFF\xFE<\x00a\x00>\x00\x00\xD8<\x00/\x00a\x00>\x00", &checker) catch failure:
+        failed = failure.code == malformed
+    assert(failed)

@@ -1,0 +1,135 @@
+#==============================================================================================
+#
+#   xml/namespaces - Namespace bindings and qualified names
+#
+#   DESCRIPTION:
+#       Namespaces in XML 1.0 (Third Edition): a start tag's `xmlns` and `xmlns:prefix`
+#       attributes bind prefixes for the element and its content; its name and its
+#       prefixed attributes' names are then resolved against the bindings in scope. The
+#       constraints are checked here: names are QNames (at most one colon, neither part
+#       empty), every prefix used is declared, `xml` is bound only to its namespace and
+#       `xmlns` never, no other prefix is bound to either namespace, a prefix is never
+#       undeclared (`xmlns:p=""`), and no two attributes have the same namespace and
+#       local name. URIs are interned in the reader's arena, so a binding stays valid as
+#       long as the reader.
+#
+#==============================================================================================
+
+## Resolve the namespaces of the start tag whose attributes are in `Reader.attributes`;
+## answer the element's name. The tag's bindings are pushed onto `Reader.bindings`.
+func resolve_namespaces(reader: Reader*, qualified: str) -> Name!:
+    for index in 0..<reader.attributes.used:
+        let attribute = reader.attributes.items[index]
+        let written = attribute.name.qualified
+        if written == "xmlns":
+            if attribute.value == xml_namespace or attribute.value == xmlns_namespace:
+                error(malformed, try reader.complain(f"the default namespace cannot be {attribute.value}"))
+            try reader.bindings.push(Binding(uri = try intern(reader, attribute.value)))
+            reader.attributes.items[index].name = Name(qualified = written, local_name = "xmlns", namespace = xmlns_namespace)
+            continue
+        if written.length < 6 or not ((str)written.bytes[..<6] == "xmlns:"):
+            continue
+        let prefix = (str)written.bytes[6..]
+        if not is_name(prefix, false):
+            error(malformed, try reader.complain(f"'{written}' does not declare a valid prefix"))
+        if prefix == "xmlns":
+            error(malformed, try reader.complain("the prefix 'xmlns' cannot be declared"))
+        if prefix == "xml":
+            if attribute.value != xml_namespace:
+                error(malformed, try reader.complain(f"the prefix 'xml' can only be bound to {xml_namespace}"))
+        elif attribute.value == xml_namespace:
+            error(malformed, try reader.complain(f"only the prefix 'xml' can be bound to {xml_namespace}"))
+        if attribute.value == xmlns_namespace:
+            error(malformed, try reader.complain(f"no prefix can be bound to {xmlns_namespace}"))
+        if attribute.value.length == 0:
+            error(malformed, try reader.complain(f"the prefix '{prefix}' cannot be undeclared (XML 1.0 namespaces)"))
+        try reader.bindings.push(Binding(prefix = prefix, uri = try intern(reader, attribute.value)))
+        reader.attributes.items[index].name = Name(qualified = written, prefix = "xmlns", local_name = prefix, namespace = xmlns_namespace)
+    let element = try qualify(reader, qualified, "element")
+    if element.prefix == "xmlns":
+        error(malformed, try reader.complain(f"the element <{qualified}> cannot have the prefix 'xmlns'"))
+    var resolved = element
+    resolved.namespace = try lookup(reader, element.prefix, qualified)
+    for index in 0..<reader.attributes.used:
+        let attribute = reader.attributes.items[index]
+        if attribute.name.namespace == xmlns_namespace:
+            continue
+        var name = try qualify(reader, attribute.name.qualified, "attribute")
+        if name.prefix.length > 0:
+            if name.prefix == "xmlns":
+                error(malformed, try reader.complain(f"the attribute '{name.qualified}' cannot have the prefix 'xmlns'"))
+            name.namespace = try lookup(reader, name.prefix, name.qualified)
+        reader.attributes.items[index].name = name
+    try check_expanded_unique(reader, qualified)
+    return resolved
+
+## `written` as a QName ([7] of Namespaces): its prefix and local part; `what` names it in
+## errors.
+func qualify(reader: Reader*, written: str, what: str) -> Name!:
+    var colon: usize? = none
+    for (index, byte) in written.bytes.indexed():
+        if byte == ':':
+            if colon != none:
+                error(malformed, try reader.complain(f"the {what} name '{written}' has more than one colon"))
+            colon = index
+    let at = colon else return Name(qualified = written, local_name = written)
+    let prefix = (str)written.bytes[..<at]
+    let local_name = (str)written.bytes[at + 1..]
+    if prefix.length == 0 or not is_name(local_name, false):
+        error(malformed, try reader.complain(f"the {what} name '{written}' is not a valid qualified name"))
+    return Name(qualified = written, prefix = prefix, local_name = local_name)
+
+## The namespace `prefix` is bound to ("" for the default namespace when none is);
+## `written` names the name in errors.
+func lookup(reader: Reader*, prefix: str, written: str) -> str!:
+    if prefix == "xml":
+        return xml_namespace
+    var index = reader.bindings.used
+    while index > 0:
+        index -= 1
+        if reader.bindings.items[index].prefix == prefix:
+            return reader.bindings.items[index].uri
+    if prefix.length == 0:
+        return ""
+    error(malformed, try reader.complain(f"the prefix '{prefix}' of '{written}' is not declared"))
+
+## No two attributes may have the same namespace and local name (NSC: Attributes Unique).
+func check_expanded_unique(reader: Reader*, qualified: str) -> !:
+    let attributes = reader.attributes.view()
+    if attributes.length <= 16:
+        for index in 1..<attributes.length:
+            let name = attributes[index].name
+            if name.namespace.length == 0 or name.namespace == xmlns_namespace:
+                continue
+            for earlier in 0..<index:
+                let other = attributes[earlier].name
+                if other.local_name == name.local_name and other.namespace == name.namespace:
+                    error(malformed, try reader.complain(f"'{other.qualified}' and '{name.qualified}' in <{qualified}> are the same attribute"))
+        return
+    var total: usize = 0
+    for attribute in attributes:
+        total += attribute.name.namespace.length + attribute.name.local_name.length + 1
+    reader.scratch.clear()
+    try reader.scratch.reserve(total)
+    reader.seen.clear()
+    for (index, attribute) in attributes.indexed():
+        let name = attribute.name
+        if name.namespace.length == 0 or name.namespace == xmlns_namespace:
+            continue
+        let start = reader.scratch.used
+        try reader.scratch.add_all(name.namespace.bytes)
+        try reader.scratch.add(' ')
+        try reader.scratch.add_all(name.local_name.bytes)
+        let key = (str)reader.scratch.items[start..<reader.scratch.used]
+        if reader.seen.find(key) != none:
+            error(malformed, try reader.complain(f"two attributes of <{qualified}> are both '{name.local_name}' in {name.namespace}"))
+        try reader.seen.insert(key, (u32)index)
+
+## `uri` kept in the reader's arena, one copy of each.
+func intern(reader: Reader*, uri: str) -> str!:
+    if let index = reader.uris.find(uri):
+        return reader.interned.items[index]
+    let kept = try reader.arena.store(uri.bytes)
+    try reader.uris.insert(kept, (u32)reader.interned.used)
+    try reader.interned.push(kept)
+    return kept

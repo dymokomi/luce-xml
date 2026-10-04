@@ -1,0 +1,80 @@
+#==============================================================================================
+#
+#   tests/xml/structure - The prolog, the epilogue, tags and their errors
+#
+#==============================================================================================
+
+test "the XML declaration is read and checked":
+    try expect_record("<?xml version='1.0' encoding='UTF-8' standalone='yes'?><a/>", "<a/></a>")
+    try expect_failure("<?xml encoding='UTF-8'?><a/>", "version first")
+    try expect_failure("<?xml version='2.0'?><a/>", "is not an XML version")
+    try expect_failure("<?xml version='1.0' standalone='maybe'?><a/>", "standalone must be")
+    try expect_failure("<?xml version='1.0'encoding='UTF-8'?><a/>", "white space before 'encoding'")
+    try expect_failure(" <?xml version='1.0'?><a/>", "very start")
+
+test "one root element, with only comments, PIs and space around it":
+    try expect_failure("", "no root element")
+    try expect_failure("<a/><b/>", "one root element")
+    try expect_failure("<a/>text", "text outside the root element")
+    try expect_failure("text<a/>", "text outside the root element")
+    try expect_record("\n<!--x-->\n<a/>\n<?p?>\n", "<!--x--><a/></a><?p ?>")
+
+test "tags must match and close":
+    try expect_failure("<a><b></a></b>", "the end tag </a> does not match the start tag <b>")
+    try expect_failure("<a>", "the element <a> is not closed")
+    try expect_failure("<a b='1' b='2'/>", "appears twice")
+    try expect_failure("<a b='1'c='2'/>", "white space before an attribute")
+    try expect_failure("<a b=1/>", "must be quoted")
+    try expect_failure("<a b='<'/>", "'<' in the value")
+    try expect_failure("<1a/>", "expected an element name")
+
+test "errors say where they are":
+    var recorder = Recorder()
+    defer recorder.release()
+    let found = try record("<a>\n  <b>\n</a>", &recorder)
+    if found != "error 3:1: the end tag </a> does not match the start tag <b>":
+        print(found)
+        trap("the position is wrong")
+
+test "the error's byte offset counts the original line ends and byte order mark":
+    var parser = Parser()
+    defer parser.release()
+    var checker = Checker()
+    parser.parse("\u{FEFF}<a>\r\n\r\n</b>".bytes, &checker) catch failure:
+        discard(failure)
+    let found = parser.failure else trap("the parse should fail")
+    assert(found.position.line == 3)
+    assert(found.position.column == 1)
+    assert(found.position.offset == 10)
+
+test "a listener's failure stops the parse and is returned":
+    var parser = Parser()
+    defer parser.release()
+    var refusing = Refusing()
+    var failed = false
+    parser.parse("<a><b/></a>".bytes, &refusing) catch failure:
+        failed = failure.code == refused
+    assert(failed)
+    assert(parser.failure == none)
+
+test "check answers whether a document is well-formed":
+    assert(check("<a/>".bytes))
+    assert(not check("<a>".bytes))
+
+## A listener that fails on the first element end.
+struct Refusing: Listener:
+    var seen: usize = 0
+
+    pub mutating func event(event: Event) -> !:
+        match event:
+            .element_end(name):
+                discard(name)
+                error(refused, "no ends wanted")
+            _:
+                self.seen += 1
+
+    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
+        discard(request)
+        return none
+
+let refused: ErrorCode = ErrorCode.package(90)

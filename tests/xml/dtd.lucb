@@ -1,0 +1,106 @@
+#==============================================================================================
+#
+#   tests/xml/dtd - The DOCTYPE, entities and attribute declarations
+#
+#==============================================================================================
+
+test "the DOCTYPE event gives the name, identifiers and notations":
+    try expect_record("<!DOCTYPE doc PUBLIC '-//A//B  C//EN' 'doc.dtd' [<!NOTATION n SYSTEM 'n'>]><doc/>",
+                      "<!DOCTYPE doc PUBLIC \"-//A//B C//EN\" \"doc.dtd\" N:n><doc/></doc>")
+
+test "the internal subset is reported as written":
+    var parser = Parser()
+    defer parser.release()
+    var keeper = SubsetKeeper()
+    defer keeper.subset.release()
+    try parser.parse("<!DOCTYPE d [ <!ENTITY e 'x'> ]><d/>".bytes, &keeper)
+    assert(keeper.subset.view() == " <!ENTITY e 'x'> ")
+
+test "internal entities expand, markup and all":
+    try expect_record("<!DOCTYPE d [<!ENTITY e 'one <b>two</b> &f;'><!ENTITY f 'three'>]><d>&e;</d>",
+                      "<!DOCTYPE d><d>one <b>two</b> three</d>")
+
+test "character references in entity values are replaced when declared":
+    try expect_record("<!DOCTYPE d [<!ENTITY e '&#60;i/>&#38;#60;'>]><d>&e;</d>", "<!DOCTYPE d><d><i/></i>&lt;</d>")
+
+test "the first declaration of an entity binds":
+    try expect_record("<!DOCTYPE d [<!ENTITY e 'first'><!ENTITY e 'second'>]><d>&e;</d>", "<!DOCTYPE d><d>first</d>")
+
+test "parameter entities between declarations":
+    try expect_record("<!DOCTYPE d [<!ENTITY % p '<!ENTITY e \"from p\">'>%p;]><d>&e;</d>", "<!DOCTYPE d><d>from p</d>")
+
+test "a parameter entity inside a declaration in the internal subset is an error":
+    try expect_failure("<!DOCTYPE d [<!ENTITY % t 'CDATA'><!ATTLIST d a %t; #IMPLIED>]><d/>", "parameter-entity reference")
+
+test "entity constraints":
+    try expect_failure("<d>&nope;</d>", "the entity 'nope' is not declared")
+    try expect_failure("<!DOCTYPE d [<!ENTITY e '&e;'>]><d>&e;</d>", "refers to itself")
+    try expect_failure("<!DOCTYPE d [<!ENTITY e '<b>'>]><d>&e;</d>", "ends inside the element <b>")
+    try expect_failure("<!DOCTYPE d [<!ENTITY e '</d>'>]><d>&e;", "different entity")
+    try expect_failure("<!DOCTYPE d [<!NOTATION n SYSTEM 'n'><!ENTITY e SYSTEM 'e' NDATA n>]><d>&e;</d>", "unparsed entity")
+    try expect_failure("<!DOCTYPE d [<!ENTITY e SYSTEM 'e.xml'>]><d a='&e;'/>", "external entity")
+    try expect_failure("<!DOCTYPE d [<!ENTITY e '<'>]><d a='&e;'/>", "holds '<'")
+
+test "an undeclared entity is skipped when the DTD is external":
+    try expect_record("<!DOCTYPE d SYSTEM 'd.dtd'><d>a&nbsp;b</d>", "<!DOCTYPE d \"d.dtd\"><d>ab</d>")
+
+test "the listener answers undeclared names with characters":
+    var recorder = Recorder(named = true)
+    defer recorder.release()
+    let found = try record("<!DOCTYPE d SYSTEM 'd.dtd'><d a='&nbsp;'>&nbsp;&amp;</d>", &recorder)
+    assert(found == "<!DOCTYPE d \"d.dtd\"><d a=\"\u{A0}\">\u{A0}&amp;</d>")
+
+test "attribute values are normalised by their declared type":
+    try expect_record("<!DOCTYPE d [<!ATTLIST d t NMTOKENS #IMPLIED c CDATA #IMPLIED>]><d t='  x \n y  ' c='  x \n y  '/>",
+                      "<!DOCTYPE d><d t=\"x y\" c=\"  x   y  \"/></d>")
+
+test "an entity's line feed becomes a space in an attribute value, a character reference stays":
+    try expect_record("<!DOCTYPE d [<!ENTITY e '&#10;'><!ENTITY f '&#38;#10;'>]><d a='&e;|&f;'/>",
+                      "<!DOCTYPE d><d a=\" |&#10;\"/></d>")
+
+test "default attributes are added after the given ones":
+    try expect_record("<!DOCTYPE d [<!ATTLIST d a CDATA 'one' b CDATA #FIXED 'two' c CDATA #IMPLIED>]><d b='x'/>",
+                      "<!DOCTYPE d><d b=\"x\" a~=\"one\"/></d>")
+
+test "an unread parameter entity stops later declarations":
+    try expect_record("<!DOCTYPE d [<!ATTLIST d a CDATA 'one'><!ENTITY % p SYSTEM 'p.ent'>%p;<!ATTLIST d b CDATA 'two'>]><d/>",
+                      "<!DOCTYPE d><d a~=\"one\"/></d>")
+
+test "declaration grammar errors":
+    try expect_failure("<!DOCTYPE d [<!ELEMENT d (a|b,c)>]><d/>", "cannot mix")
+    try expect_failure("<!DOCTYPE d [<!ELEMENT d (#PCDATA|a)>]><d/>", "must end with ')*'")
+    try expect_failure("<!DOCTYPE d [<!ATTLIST d a CDATA>]><d/>", "white space before the attribute's default")
+    try expect_failure("<!DOCTYPE d [<!ENTITY % e SYSTEM 'x' NDATA n>]><d/>", "cannot be unparsed")
+    try expect_failure("<!DOCTYPE d [<![INCLUDE[]]>]><d/>", "only in the external subset")
+    try expect_failure("<!DOCTYPE d [<!NOTATION n PUBLIC 'a<'>]><d/>", "public identifier")
+
+test "the external subset and external entities come from the listener":
+    var recorder = Recorder()
+    defer recorder.release()
+    try recorder.supplied.push(Supplied(system_id = "d.dtd", text = "<?xml encoding='UTF-8'?><!ENTITY e SYSTEM 'e.ent'><![INCLUDE[<!ATTLIST d a CDATA 'in'>]]><![IGNORE[<!ATTLIST d b CDATA 'out'>]]>"))
+    try recorder.supplied.push(Supplied(system_id = "e.ent", text = "<?xml version='1.0' encoding='UTF-8'?>text <i/>"))
+    let found = try record("<!DOCTYPE d SYSTEM 'd.dtd'><d>&e;</d>", &recorder)
+    assert(found == "<!DOCTYPE d \"d.dtd\"><d a~=\"in\">text <i/></i></d>")
+    assert(recorder.requests.view() == "[d:d.dtd][e:e.ent]")
+
+test "parameter entities inside declarations in the external subset":
+    var recorder = Recorder()
+    defer recorder.release()
+    try recorder.supplied.push(Supplied(system_id = "d.dtd", text = "<!ENTITY % t 'CDATA'><!ENTITY % v '\"v\"'><!ATTLIST d a %t; %v;>"))
+    let found = try record("<!DOCTYPE d SYSTEM 'd.dtd'><d/>", &recorder)
+    assert(found == "<!DOCTYPE d \"d.dtd\"><d a~=\"v\"/></d>")
+
+## Keeps the internal subset of the DOCTYPE event.
+struct SubsetKeeper: Listener:
+    var subset: Bytes = Bytes()
+
+    pub mutating func event(event: Event) -> !:
+        match event:
+            .doctype(doctype):
+                try self.subset.add_all(doctype.internal_subset.bytes)
+            _:
+                return
+
+    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
+        discard(request)
+        return none

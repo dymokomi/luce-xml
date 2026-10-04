@@ -1,0 +1,199 @@
+#==============================================================================================
+#
+#   xml/entities - References, and loading external entities
+#
+#   DESCRIPTION:
+#       Character references ([66]) become the character they name, which must be an XML
+#       character. A general entity reference ([68]) is one of the five predefined
+#       entities, or names an entity the DTD declares, whose replacement text is then
+#       pushed as a frame and read in place; or, where XML allows an undeclared one, it is
+#       offered to the listener as a `named` entity, whose answer is literal text.
+#       Expansion is bounded: entity references may nest only `Options.max_entity_depth`
+#       deep, and all of them together may produce only `Options.max_expansion` bytes,
+#       which stops an exponential "billion laughs" or a quadratic blow-up early.
+#
+#       An external entity is loaded on its first reference: the listener is asked for
+#       its bytes, which are decoded like a document, and its text declaration ([77]) is
+#       read and dropped. One the listener does not supply is skipped from then on.
+#
+#==============================================================================================
+
+## What a general entity reference refers to.
+enum Found:
+    ## Nothing to read: an entity that is skipped or not supplied.
+    skip
+    ## The declared entity at this index.
+    entity(index: usize)
+    ## Literal characters, from the listener for an undeclared name.
+    literal(text: const u8[])
+
+# mark: References ============================================================================
+
+## A character reference, `&#` at the position; answers its character.
+func read_char_reference(reader: Reader*) -> u32!:
+    let start = reader.position()
+    reader.advance(2)
+    let hexadecimal = reader.peek() == 'x'
+    if hexadecimal:
+        reader.advance(1)
+    var value: u32 = 0
+    var digits: usize = 0
+    while true:
+        let byte = reader.peek()
+        var digit: u32 = 16
+        if byte >= '0' and byte <= '9':
+            digit = (u32)(byte - '0')
+        elif hexadecimal and byte >= 'a' and byte <= 'f':
+            digit = (u32)(byte - 'a') + 10
+        elif hexadecimal and byte >= 'A' and byte <= 'F':
+            digit = (u32)(byte - 'A') + 10
+        if digit == 16:
+            break
+        value = value * (16 if hexadecimal else 10) + digit
+        if value > 0x10FFFF:
+            value = 0x110000
+        digits += 1
+        reader.advance(1)
+    if digits == 0:
+        error(malformed, try reader.complain("expected digits in the character reference"))
+    if not reader.accept(";"):
+        error(malformed, try reader.complain("a character reference must end with ';'"))
+    if not is_char(value):
+        let written = reader.since(start)
+        reader.rewind(start)
+        error(malformed, try reader.complain(f"'{written}' does not refer to an XML character"))
+    return value
+
+## An entity reference's name, `&` at the position, through its `;`.
+func read_entity_name(reader: Reader*) -> str!:
+    reader.advance(1)
+    let name = reader.scan_name()
+    if name.length == 0:
+        error(malformed, try reader.complain("'&' must begin a reference; write a literal '&' as &amp;"))
+    if not reader.accept(";"):
+        error(malformed, try reader.complain(f"the reference '&{name}' must end with ';'"))
+    return name
+
+## The character a predefined entity stands for (§4.6).
+func predefined(name: str) -> u32?:
+    if name == "lt":
+        return 60
+    if name == "gt":
+        return 62
+    if name == "amp":
+        return 38
+    if name == "apos":
+        return 39
+    if name == "quot":
+        return 34
+    return none
+
+## What the general entity `name` refers to, checking the constraints on the reference.
+func find_general(reader: Reader*, name: str) -> Found!:
+    if let found = reader.general.find(name):
+        let index = (usize)found
+        let entity = &reader.entities.items[index]
+        if entity.notation.length > 0:
+            error(malformed, try reader.complain(f"the unparsed entity '{name}' cannot be referenced"))
+        if entity.expanding:
+            error(malformed, try reader.complain(f"the entity '{name}' refers to itself"))
+        if reader.standalone and entity.outside:
+            error(malformed, try reader.complain(f"the standalone document uses '{name}', declared outside its internal subset"))
+        return .entity(index)
+    if must_declare(reader):
+        error(malformed, try reader.complain(f"the entity '{name}' is not declared"))
+    let request = EntityRequest(kind = EntityKind.named, name = name)
+    if let text = reader.listener.resolve(&request):
+        if is_valid_text(text):
+            return .literal(text)
+    return .skip
+
+## Whether every general entity referenced must be declared (WFC: Entity Declared): in a
+## document with no DTD, one whose DTD is only an internal subset without parameter
+## entity references, or a standalone one.
+func must_declare(reader: const Reader*) -> bool:
+    return not reader.has_doctype or reader.standalone or (not reader.external_subset and not reader.pe_references)
+
+## Whether `text` is UTF-8 holding only XML characters.
+func is_valid_text(text: const u8[]) -> bool:
+    var index: usize = 0
+    while index < text.length:
+        let size = utf8_length(text, index)
+        if size == 0:
+            return false
+        let (scalar, _) = decode_utf8(text, index)
+        if not is_char(scalar):
+            return false
+        index += size
+    return true
+
+## A reference in content, `&` at the position.
+func read_content_reference(reader: Reader*) -> !:
+    if reader.peek_at(1) == '#':
+        try add_text_scalar(reader, try read_char_reference(reader))
+        return
+    let name = try read_entity_name(reader)
+    if let scalar = predefined(name):
+        try add_text_scalar(reader, scalar)
+        return
+    match try find_general(reader, name):
+        .skip:
+            return
+        .literal(text):
+            try add_text_bytes(reader, text)
+        .entity(index):
+            if reader.entities.items[index].external:
+                try load_entity(reader, index)
+                if reader.entities.items[index].unavailable:
+                    return
+            try push_entity(reader, index)
+
+# mark: Expansion =============================================================================
+
+## Push entity `index`'s replacement text as the top frame, within the limits.
+func push_entity(reader: Reader*, index: usize) -> !:
+    if reader.frames.used > reader.options.max_entity_depth:
+        error(limit, try reader.report(limit, f"entity references nest more than {reader.options.max_entity_depth} deep"))
+    let entity = &reader.entities.items[index]
+    reader.expanded += entity.value.length
+    if reader.expanded > reader.options.max_expansion:
+        error(limit, try reader.report(limit, f"entity references expand to more than {reader.options.max_expansion} bytes"))
+    entity.expanding = true
+    let parent = &reader.frames.items[reader.frames.used - 1]
+    let in_external = parent.in_external or entity.external
+    let system_id = entity.system_id if entity.external else ""
+    try reader.frames.push(Frame(text = entity.value, entity = (u32)index + 1, external = entity.external,
+                                 in_external = in_external, depth = reader.open.used, system_id = system_id))
+
+## Pop the top frame, a parameter entity's text that has ended.
+func end_parameter_entity(reader: Reader*):
+    let top = reader.top()
+    reader.entities.items[reader.frames.items[top].entity - 1].expanding = false
+    reader.frames.used -= 1
+
+## Load external entity `index` if it is not loaded yet: ask the listener for its bytes,
+## decode them and drop the text declaration. Marks it unavailable if not supplied.
+func load_entity(reader: Reader*, index: usize) -> !:
+    let entity = reader.entities.items[index]
+    if entity.loaded or entity.unavailable:
+        return
+    let kind = EntityKind.parameter if entity.parameter else EntityKind.general
+    let request = EntityRequest(kind = kind, name = entity.name, public_id = entity.public_id, system_id = entity.system_id,
+                                base = entity.base)
+    if let bytes = reader.listener.resolve(&request):
+        let text = try read_external_text(reader, bytes, entity.system_id, entity.parameter)
+        reader.entities.items[index].value = text
+        reader.entities.items[index].loaded = true
+        return
+    reader.entities.items[index].unavailable = true
+
+## An external entity's `bytes` decoded, its text declaration read and dropped.
+## `parameter` for a parameter entity (or the external subset), whose text is read as
+## part of the DTD.
+func read_external_text(reader: Reader*, bytes: const u8[], system_id: str, parameter: bool) -> str!:
+    let text = try decode_entity(reader, bytes, false, system_id)
+    try reader.frames.push(Frame(text = text, external = true, in_external = parameter, system_id = system_id))
+    try read_xml_declaration(reader, false)
+    let rest = (str)text.bytes[reader.position()..]
+    reader.frames.used -= 1
+    return rest

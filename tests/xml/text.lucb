@@ -1,0 +1,64 @@
+#==============================================================================================
+#
+#   tests/xml/text - Character data, references and line ends
+#
+#==============================================================================================
+
+test "the predefined entities and character references":
+    try expect_record("<a>&lt;&gt;&amp;&apos;&quot; &#65;&#x42;&#x1F600;</a>", "<a>&lt;&gt;&amp;'\" AB\u{1F600}</a>")
+
+test "text around markup arrives in single runs":
+    var recorder = Recorder()
+    defer recorder.release()
+    var parser = Parser()
+    defer parser.release()
+    var counter = TextCounter()
+    try parser.parse("<a>one &amp; two<b/>three&#33;</a>".bytes, &counter)
+    assert(counter.texts == 2)
+
+test "line ends are normalised":
+    try expect_record("<a>x\r\ny\rz\n</a>", "<a>x&#10;y&#10;z&#10;</a>")
+    try expect_record("<a b='1\r\n2'/>", "<a b=\"1 2\"/></a>")
+
+test "a character reference to CR survives normalisation":
+    try expect_record("<a>&#13;&#10;</a>", "<a>&#13;&#10;</a>")
+
+test "']]>' is not allowed in text":
+    try expect_failure("<a>x]]>y</a>", "']]>' in text")
+
+test "a bare ampersand is an error":
+    try expect_failure("<a>fish & chips</a>", "'&' must begin a reference")
+
+test "a reference to a character that is not XML":
+    try expect_failure("<a>&#0;</a>", "does not refer to an XML character")
+    try expect_failure("<a>&#xD800;</a>", "does not refer to an XML character")
+    try expect_failure("<a>&#X41;</a>", "expected digits")
+
+test "control characters and bad UTF-8 are errors":
+    try expect_failure("<a>\u{1}</a>", "control character")
+    try expect_failure("<a>\u{FFFE}</a>", "#xfffe")
+
+test "comments may not contain two hyphens":
+    try expect_failure("<a><!-- a -- b --></a>", "'--' inside a comment")
+    try expect_failure("<a><!-- a ---></a>", "'--' inside a comment")
+
+test "processing instructions":
+    try expect_record("<a><?target  some data ?></a>", "<a><?target some data ?></a>")
+    try expect_failure("<a><?xml version='1.0'?></a>", "very start")
+    try expect_failure("<a><?XmL x?></a>", "reserved")
+
+## Counts `text` events.
+struct TextCounter: Listener:
+    var texts: usize = 0
+
+    pub mutating func event(event: Event) -> !:
+        match event:
+            .text(text):
+                discard(text)
+                self.texts += 1
+            _:
+                return
+
+    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
+        discard(request)
+        return none

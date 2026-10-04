@@ -1,0 +1,226 @@
+#==============================================================================================
+#
+#   xml/tags - Start tags: attributes, their values, defaults and normalisation
+#
+#   DESCRIPTION:
+#       A start tag or empty-element tag ([40], [44]) is read whole before its event is
+#       sent: its attributes' values are normalised (§3.3.3: references replaced, white
+#       space characters made spaces, and, for an attribute the DTD declares with a type
+#       other than CDATA, spaces collapsed), each name must appear once, the defaults the
+#       DTD declares for attributes not written are added, and then namespaces are
+#       resolved (namespaces.lucb). A value needing no change stays a view of the input;
+#       the others are built in `Reader.values`, which is why attributes are first kept as
+#       `RawAttribute`s and only made `Attribute`s once every value is in place.
+#
+#==============================================================================================
+
+## A start tag at the position (`<` then a name).
+func read_start_tag(reader: Reader*) -> !:
+    if reader.open.used >= reader.options.max_depth:
+        error(limit, try reader.report(limit, f"elements nest more than {reader.options.max_depth} deep"))
+    reader.advance(1)
+    let qualified = reader.scan_name()
+    if qualified.length == 0:
+        error(malformed, try reader.complain("expected an element name after '<'"))
+    reader.raw.used = 0
+    reader.values.clear()
+    var empty = false
+    while true:
+        let spaced = reader.skip_spaces()
+        let byte = reader.peek()
+        if byte == '>':
+            reader.advance(1)
+            break
+        if byte == '/':
+            if reader.peek_at(1) != '>':
+                error(malformed, try reader.complain(f"expected '>' after '/' in the tag <{qualified}>"))
+            reader.advance(2)
+            empty = true
+            break
+        if reader.at_end():
+            error(malformed, try reader.complain(f"the start tag <{qualified}> is not closed"))
+        if not spaced:
+            error(malformed, try reader.complain(f"expected white space before an attribute in <{qualified}>"))
+        let attribute = reader.scan_name()
+        if attribute.length == 0:
+            error(malformed, try reader.complain(f"expected an attribute name, '>' or '/>' in <{qualified}>"))
+        discard(reader.skip_spaces())
+        if not reader.accept("="):
+            error(malformed, try reader.complain(f"expected '=' after the attribute name '{attribute}'"))
+        discard(reader.skip_spaces())
+        try read_attribute_value(reader, attribute)
+    try check_unique(reader, qualified)
+    try apply_declarations(reader, qualified)
+    try finish_start_tag(reader, qualified, empty)
+
+## Each attribute name may appear once in a tag (WFC: Unique Att Spec).
+func check_unique(reader: Reader*, qualified: str) -> !:
+    let raw = reader.raw.view()
+    if raw.length <= 16:
+        for index in 1..<raw.length:
+            for earlier in 0..<index:
+                if raw[earlier].name == raw[index].name:
+                    error(malformed, try reader.complain(f"the attribute '{raw[index].name}' appears twice in <{qualified}>"))
+        return
+    reader.seen.clear()
+    for (index, attribute) in raw.indexed():
+        if reader.seen.find(attribute.name) != none:
+            error(malformed, try reader.complain(f"the attribute '{attribute.name}' appears twice in <{qualified}>"))
+        try reader.seen.insert(attribute.name, (u32)index)
+
+# mark: Attribute values ======================================================================
+
+## An attribute's quoted value ([10]) at the position, normalised; adds it to
+## `Reader.raw`.
+func read_attribute_value(reader: Reader*, attribute: str) -> !:
+    let quote = reader.peek()
+    if quote != '"' and quote != '\'':
+        error(malformed, try reader.complain(f"the value of the attribute '{attribute}' must be quoted"))
+    reader.advance(1)
+    let frame = &reader.frames.items[reader.frames.used - 1]
+    let data = frame.text.bytes
+    let start = frame.pos
+    var index = start
+    while index < data.length and data[index] != quote:
+        let byte = data[index]
+        if byte == '&' or byte == '\t' or byte == '\n' or byte == '\r' or byte == '<':
+            break
+        index += 1
+    if index < data.length and data[index] == quote:
+        frame.pos = index + 1
+        try reader.raw.push(RawAttribute(name = attribute, value = (str)data[start..<index]))
+        return
+    let built_start = reader.values.used
+    try read_value_text(reader, quote, attribute)
+    try reader.raw.push(RawAttribute(name = attribute, built = true, start = built_start, end = reader.values.used))
+
+## Normalise text from the top frame into `Reader.values`, up to the closing `quote`, or
+## to the frame's end (an entity's replacement text) when `quote` is 0.
+func read_value_text(reader: Reader*, quote: u8, attribute: str) -> !:
+    while true:
+        if reader.at_end():
+            if quote == 0:
+                return
+            error(malformed, try reader.complain(f"the value of the attribute '{attribute}' is not closed"))
+        let byte = reader.peek()
+        if byte == quote:
+            reader.advance(1)
+            return
+        if byte == '<':
+            if quote == 0:
+                let entity = &reader.entities.items[reader.frames.items[reader.top()].entity - 1]
+                error(malformed, try reader.complain(f"the entity '{entity.name}' holds '<' and is used in the value of '{attribute}'"))
+            error(malformed, try reader.complain(f"'<' in the value of the attribute '{attribute}' must be written &lt;"))
+        if byte == '&':
+            try read_value_reference(reader, attribute)
+        elif is_space(byte):
+            try reader.values.add(' ')
+            reader.advance(1)
+        else:
+            try reader.values.add(byte)
+            reader.advance(1)
+
+## A reference in an attribute value, `&` at the position.
+func read_value_reference(reader: Reader*, attribute: str) -> !:
+    if reader.peek_at(1) == '#':
+        try reader.values.add_scalar(try read_char_reference(reader))
+        return
+    let name = try read_entity_name(reader)
+    if let scalar = predefined(name):
+        try reader.values.add_scalar(scalar)
+        return
+    match try find_general(reader, name):
+        .skip:
+            return
+        .literal(text):
+            for byte in text:
+                try reader.values.add(' ' if is_space(byte) else byte)
+        .entity(index):
+            if reader.entities.items[index].external:
+                error(malformed, try reader.complain(f"the value of the attribute '{attribute}' refers to the external entity '{name}'"))
+            try push_entity(reader, index)
+            try read_value_text(reader, 0, attribute)
+            reader.entities.items[index].expanding = false
+            reader.frames.used -= 1
+
+# mark: Declared attributes ===================================================================
+
+## Collapse the values of attributes the DTD declares with a type other than CDATA, and
+## add the defaults it declares for attributes the tag does not give.
+func apply_declarations(reader: Reader*, qualified: str) -> !:
+    let list = reader.element_types.find(qualified) else return
+    var link = reader.attribute_lists.items[list].first
+    while link != 0:
+        let declared = reader.declared.items[link - 1]
+        link = declared.next
+        var given = false
+        for index in 0..<reader.raw.used:
+            if reader.raw.items[index].name == declared.name:
+                given = true
+                if not declared.cdata:
+                    try collapse_attribute(reader, index)
+                break
+        if given:
+            continue
+        if let value = declared.value:
+            try reader.raw.push(RawAttribute(name = declared.name, value = value, specified = false))
+
+## Collapse attribute `index`'s value: no leading or trailing spaces, runs of spaces one.
+func collapse_attribute(reader: Reader*, index: usize) -> !:
+    let attribute = reader.raw.items[index]
+    let start = reader.values.used
+    var pending = false
+    var length: usize = 0
+    var position = attribute.start
+    let end = attribute.end if attribute.built else attribute.value.length
+    while position < end:
+        let byte = reader.values.items[position] if attribute.built else attribute.value.bytes[position]
+        position += 1
+        if byte == ' ':
+            pending = length > 0
+            continue
+        if pending:
+            try reader.values.add(' ')
+            length += 1
+            pending = false
+        try reader.values.add(byte)
+        length += 1
+    reader.raw.items[index] = RawAttribute(name = attribute.name, built = true, start = start, end = reader.values.used,
+                                           specified = attribute.specified)
+
+## Collapse `value` the same way into `Reader.scratch`, answering the result (valid until
+## the scratch buffer next changes).
+func collapse_text(reader: Reader*, value: str) -> str!:
+    reader.scratch.clear()
+    var pending = false
+    for byte in value.bytes:
+        if byte == ' ':
+            pending = reader.scratch.used > 0
+            continue
+        if pending:
+            try reader.scratch.add(' ')
+            pending = false
+        try reader.scratch.add(byte)
+    return reader.scratch.view()
+
+## Make the tag's attributes, resolve its namespaces, and send `element_start` (and, for
+## an empty-element tag, `element_end`).
+func finish_start_tag(reader: Reader*, qualified: str, empty: bool) -> !:
+    reader.attributes.used = 0
+    for attribute in reader.raw.view():
+        var value = attribute.value
+        if attribute.built:
+            value = (str)reader.values.items[attribute.start..<attribute.end]
+        let name = Name(qualified = attribute.name, local_name = attribute.name)
+        try reader.attributes.push(Attribute(name = name, value = value, specified = attribute.specified))
+    let bindings = reader.bindings.used
+    var name = Name(qualified = qualified, local_name = qualified)
+    if reader.options.namespaces:
+        name = try resolve_namespaces(reader, qualified)
+    let element = Element(name = name, attributes = reader.attributes.view(), empty = empty)
+    try reader.listener.event(.element_start(&element))
+    if empty:
+        try reader.listener.event(.element_end(&name))
+        reader.bindings.used = bindings
+        return
+    try reader.open.push(Open(name = name, frame = reader.top(), bindings = bindings))

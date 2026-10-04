@@ -1,0 +1,72 @@
+#==============================================================================================
+#
+#   tests/xml/namespaces - Prefixes, default namespaces and their constraints
+#
+#==============================================================================================
+
+## Expect `source` to record `expected` with names written `{namespace}local`.
+func expect_spaced(source: str, expected: str) -> !:
+    var recorder = Recorder(spaces = true)
+    defer recorder.release()
+    let actual = try record(source, &recorder)
+    if actual != expected:
+        print(f"source:   {source}\nexpected: {expected}\nactual:   {actual}")
+        trap("the record differs")
+
+test "prefixes and the default namespace resolve":
+    try expect_spaced("<a xmlns='urn:a' xmlns:p='urn:p'><p:b p:c='1' d='2'/><e xmlns=''/></a>",
+                      "<{urn:a}a {http://www.w3.org/2000/xmlns/}xmlns=\"urn:a\" {http://www.w3.org/2000/xmlns/}p=\"urn:p\"><{urn:p}b {urn:p}c=\"1\" d=\"2\"/></{urn:p}b><e {http://www.w3.org/2000/xmlns/}xmlns=\"\"/></e></{urn:a}a>")
+
+test "the xml prefix is always bound":
+    try expect_spaced("<a xml:lang='en'/>", "<a {http://www.w3.org/XML/1998/namespace}lang=\"en\"/></a>")
+
+test "a name's parts are reported with its qualified name":
+    var parser = Parser()
+    defer parser.release()
+    var names = NameCheck()
+    try parser.parse("<p:a xmlns:p='urn:p' p:b='1'/>".bytes, &names)
+    assert(names.checked == 2)
+
+test "bindings end with their element":
+    try expect_failure("<a><b xmlns:p='urn:p'/><p:c/></a>", "the prefix 'p' of 'p:c' is not declared")
+
+test "namespace constraints":
+    try expect_failure("<p:a/>", "not declared")
+    try expect_failure("<a xmlns:p=''/>", "cannot be undeclared")
+    try expect_failure("<a xmlns:xmlns='urn:x'/>", "'xmlns' cannot be declared")
+    try expect_failure("<a xmlns:xml='urn:x'/>", "only be bound")
+    try expect_failure("<a xmlns:p='http://www.w3.org/XML/1998/namespace'/>", "only the prefix 'xml'")
+    try expect_failure("<a xmlns='http://www.w3.org/2000/xmlns/'/>", "default namespace cannot")
+    try expect_failure("<a xmlns:p='urn:x' xmlns:q='urn:x' p:b='1' q:b='2'/>", "are the same attribute")
+    try expect_failure("<a:b:c xmlns:a='urn:a'/>", "more than one colon")
+    try expect_failure("<a xmlns:p='urn:p' p:='1'/>", "not a valid qualified name")
+    try expect_failure("<xmlns:a/>", "cannot have the prefix 'xmlns'")
+    try expect_failure("<a><?p:q?></a>", "contains a colon")
+    try expect_failure("<!DOCTYPE a [<!ENTITY a:b 'x'>]><a/>", "contains a colon")
+
+test "namespaces off: names as written, no constraints":
+    var options = Options()
+    options.namespaces = false
+    try expect_record("<p:a:b xmlns:p=''/>", "<p:a:b xmlns:p=\"\"/></p:a:b>", options)
+
+## Checks the parts of the names it is sent.
+struct NameCheck: Listener:
+    var checked: usize = 0
+
+    pub mutating func event(event: Event) -> !:
+        match event:
+            .element_start(element):
+                assert(element.name.qualified == "p:a" and element.name.prefix == "p" and element.name.local_name == "a")
+                assert(element.name.namespace == "urn:p")
+                let attribute = element.attributes[1]
+                assert(attribute.name.qualified == "p:b" and attribute.name.local_name == "b" and attribute.name.namespace == "urn:p")
+                self.checked += 1
+            .element_end(name):
+                assert(name.qualified == "p:a" and name.namespace == "urn:p")
+                self.checked += 1
+            _:
+                return
+
+    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
+        discard(request)
+        return none

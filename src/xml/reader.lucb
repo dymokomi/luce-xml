@@ -1,0 +1,319 @@
+#==============================================================================================
+#
+#   xml/reader - The reader's state, its input frames and error reporting
+#
+#   DESCRIPTION:
+#       One parse is one `Reader`. Its input is a stack of `Frame`s: the document's text
+#       at the bottom, and above it the replacement text of each entity being expanded
+#       (an external one decoded and normalised when it is loaded). Scanning always
+#       reads the top frame; a construct never spans two (a start tag cannot end in a
+#       different entity than it began), so the frame's end is simply the end of the
+#       input to the scanning functions here, which answer 0 there (NUL is never an XML
+#       character). The reader also holds the DTD's declarations, the open elements and
+#       namespace bindings, and the scratch buffers events are built in.
+#
+#       `complain` turns a broken constraint into a `ParseError`: it finds the frame that
+#       is a text of its own (the document or an external entity), works out the line and
+#       column there, and writes the message into the parser's storage, so it outlives
+#       the reader.
+#
+#==============================================================================================
+
+# mark: Input frames ==========================================================================
+
+## A text being read: the document, or an entity's replacement text.
+struct Frame:
+    var text: str
+    var pos: usize = 0
+    ## 1 + the index of the entity whose text this is; 0 for the document.
+    var entity: u32 = 0
+    ## The text of an external entity or the external subset: errors report positions in
+    ## it, under `system_id`.
+    var external: bool = false
+    ## Inside the external subset or an external parameter entity, where the DTD's rules
+    ## are looser (parameter-entity references may stand inside declarations).
+    var in_external: bool = false
+    ## Elements open when the frame began; content in it must close the ones it opens.
+    var depth: usize = 0
+    var system_id: str = ""
+
+## A declared entity.
+struct Entity:
+    var name: str = ""
+    var parameter: bool = false
+    ## The replacement text: an internal entity's from its declaration, an external
+    ## one's once loaded.
+    var value: str = ""
+    var external: bool = false
+    var public_id: str? = none
+    var system_id: str = ""
+    ## The system identifier of the entity the declaration is in ("" for the document).
+    var base: str = ""
+    ## The notation of an unparsed entity; "" for a parsed one.
+    var notation: str = ""
+    ## Declared in the external subset or in a parameter entity, which a standalone
+    ## document may not rely on.
+    var outside: bool = false
+    var loaded: bool = false
+    var unavailable: bool = false
+    ## Being expanded now: a reference to it from its own text is recursion.
+    var expanding: bool = false
+
+## An attribute an ATTLIST declares.
+struct AttributeDecl:
+    var name: str = ""
+    ## Of type CDATA: its values are not collapsed.
+    var cdata: bool = true
+    ## The default, normalised; none for #REQUIRED and #IMPLIED.
+    var value: str? = none
+    ## 1 + the index of the next attribute declared for the same element; 0 for none.
+    var next: u32 = 0
+
+## The attributes declared for one element type, as a chain through `AttributeDecl.next`.
+struct AttributeList:
+    var first: u32 = 0
+    var last: u32 = 0
+
+## An element whose end tag has not been read.
+struct Open:
+    var name: Name = Name()
+    ## The frame its start tag was in; its end tag must be in the same one.
+    var frame: usize = 0
+    ## `Reader.bindings.used` before its namespace declarations.
+    var bindings: usize = 0
+
+## A namespace prefix in scope ("" for the default namespace; a "" `uri` undeclares it).
+struct Binding:
+    var prefix: str = ""
+    var uri: str = ""
+
+## An attribute of the start tag being read, before its value is placed: `value` is a
+## view of the input, or (when `built`) bytes `start..<end` of `Reader.values`.
+struct RawAttribute:
+    var name: str = ""
+    var value: str = ""
+    var built: bool = false
+    var start: usize = 0
+    var end: usize = 0
+    var specified: bool = true
+
+# mark: The reader ============================================================================
+
+## The state of one parse.
+struct Reader:
+    var listener: Listener
+    var options: Options
+    var parser: Parser*
+    var arena: Arena = Arena()
+    var frames: List[Frame] = List[Frame]()
+    var entities: List[Entity] = List[Entity]()
+    var general: Table = Table()
+    var parameters: Table = Table()
+    var notations: List[Notation] = List[Notation]()
+    var attribute_lists: List[AttributeList] = List[AttributeList]()
+    var element_types: Table = Table()
+    var declared: List[AttributeDecl] = List[AttributeDecl]()
+    var open: List[Open] = List[Open]()
+    var bindings: List[Binding] = List[Binding]()
+    var uris: Table = Table()
+    var interned: List[str] = List[str]()
+    var raw: List[RawAttribute] = List[RawAttribute]()
+    var attributes: List[Attribute] = List[Attribute]()
+    var seen: Table = Table()
+    var values: Bytes = Bytes()
+    var scratch: Bytes = Bytes()
+    ## An entity value's replacement text, as it is built.
+    var literal: Bytes = Bytes()
+    ## Character data waiting to be sent: a view `run_start..<run_end` of frame
+    ## `run_frame`, or (when `run_built`) the bytes of `text`.
+    var text: Bytes = Bytes()
+    var run_pending: bool = false
+    var run_built: bool = false
+    var run_frame: usize = 0
+    var run_start: usize = 0
+    var run_end: usize = 0
+    ## The document: its normalised text, the bytes its byte order mark took, and where
+    ## line-end normalisation dropped a CR (for byte offsets in the original).
+    var document: str = ""
+    var origin: usize = 0
+    var collapsed: List[usize] = List[usize]()
+    var declaration: Declaration = Declaration()
+    var doctype: Doctype = Doctype()
+    var has_doctype: bool = false
+    var standalone: bool = false
+    var external_subset: bool = false
+    ## A parameter-entity reference was seen in the DTD.
+    var pe_references: bool = false
+    ## A parameter entity was not read: later ENTITY and ATTLIST declarations are not
+    ## processed (XML 1.0 §5.1).
+    var skipped: bool = false
+    ## INCLUDE sections open in the external subset.
+    var includes: usize = 0
+    ## Bytes entity references have expanded to so far.
+    var expanded: usize = 0
+
+    ## Free everything the reader allocated.
+    mutating func release():
+        self.arena.release()
+        self.frames.release()
+        self.entities.release()
+        self.general.release()
+        self.parameters.release()
+        self.notations.release()
+        self.attribute_lists.release()
+        self.element_types.release()
+        self.declared.release()
+        self.open.release()
+        self.bindings.release()
+        self.uris.release()
+        self.interned.release()
+        self.raw.release()
+        self.attributes.release()
+        self.seen.release()
+        self.values.release()
+        self.scratch.release()
+        self.literal.release()
+        self.text.release()
+        self.collapsed.release()
+
+    # mark: Scanning the top frame ============================================================
+
+    ## The index of the top frame.
+    func top() -> usize:
+        return self.frames.used - 1
+
+    ## The byte at the top frame's position, or 0 at its end.
+    func peek() -> u8:
+        let frame = &self.frames.items[self.frames.used - 1]
+        return frame.text.bytes[frame.pos] if frame.pos < frame.text.length else 0
+
+    ## The byte `ahead` bytes past the position, or 0 past the end.
+    func peek_at(ahead: usize) -> u8:
+        let frame = &self.frames.items[self.frames.used - 1]
+        let index = frame.pos + ahead
+        return frame.text.bytes[index] if index < frame.text.length else 0
+
+    ## Whether the top frame continues with `expected`.
+    func looking_at(expected: str) -> bool:
+        let frame = &self.frames.items[self.frames.used - 1]
+        if frame.pos + expected.length > frame.text.length:
+            return false
+        for index in 0..<expected.length:
+            if frame.text.bytes[frame.pos + index] != expected.bytes[index]:
+                return false
+        return true
+
+    func at_end() -> bool:
+        let frame = &self.frames.items[self.frames.used - 1]
+        return frame.pos >= frame.text.length
+
+    mutating func advance(count: usize):
+        self.frames.items[self.frames.used - 1].pos += count
+
+    ## The top frame's position.
+    func position() -> usize:
+        return self.frames.items[self.frames.used - 1].pos
+
+    ## Move the top frame's position back to `pos` (for an error's position).
+    mutating func rewind(pos: usize):
+        self.frames.items[self.frames.used - 1].pos = pos
+
+    ## The top frame's text from `start` to the position.
+    func since(start: usize) -> str:
+        let frame = &self.frames.items[self.frames.used - 1]
+        return (str)frame.text.bytes[start..<frame.pos]
+
+    ## Skip white space; answer whether there was any.
+    mutating func skip_spaces() -> bool:
+        let frame = &self.frames.items[self.frames.used - 1]
+        let start = frame.pos
+        while frame.pos < frame.text.length and is_space(frame.text.bytes[frame.pos]):
+            frame.pos += 1
+        return frame.pos > start
+
+    ## Step over `expected` if the top frame continues with it.
+    mutating func accept(expected: str) -> bool:
+        if self.looking_at(expected):
+            self.advance(expected.length)
+            return true
+        return false
+
+    ## The scalar at the position and its length; (0, 0) at the end.
+    func scalar() -> (u32, usize):
+        let frame = &self.frames.items[self.frames.used - 1]
+        if frame.pos >= frame.text.length:
+            return (0, 0)
+        return decode_utf8(frame.text.bytes, frame.pos)
+
+    ## A `Name` ([5]) at the position, or "" if none starts there.
+    mutating func scan_name() -> str:
+        let start = self.position()
+        let (first, first_size) = self.scalar()
+        if first_size == 0 or not is_name_start(first):
+            return ""
+        self.advance(first_size)
+        while true:
+            let (next, size) = self.scalar()
+            if size == 0 or not is_name_char(next):
+                break
+            self.advance(size)
+        return self.since(start)
+
+    ## An `Nmtoken` ([7]) at the position, or "" if none starts there.
+    mutating func scan_nmtoken() -> str:
+        let start = self.position()
+        while true:
+            let (next, size) = self.scalar()
+            if size == 0 or not is_name_char(next):
+                break
+            self.advance(size)
+        return self.since(start)
+
+    # mark: Errors ============================================================================
+
+    ## Record a well-formedness error at the position and answer its message, for
+    ## `error(malformed, ...)`.
+    mutating func complain(message: fmt) -> str!:
+        return try self.report(malformed, message)
+
+    ## Record an error with `code` at the position and answer its message.
+    mutating func report(code: ErrorCode, message: fmt, encoding: str = "") -> str!:
+        var index = self.frames.used - 1
+        while index > 0 and not self.frames.items[index].external:
+            index -= 1
+        let frame = self.frames.items[index]
+        var position = locate(frame.text.bytes, frame.pos)
+        if index == 0:
+            position.offset += self.origin
+            for dropped in self.collapsed.view():
+                if dropped <= frame.pos:
+                    position.offset += 1
+        var storage = &self.parser.storage
+        storage.clear()
+        try storage.add_all(encoding.bytes)
+        let encoding_end = storage.used
+        try storage.add_all(frame.system_id.bytes)
+        let entity_end = storage.used
+        discard(try storage.write(f"{position.line}:{position.column}: "))
+        let message_start = storage.used
+        discard(try storage.write(message))
+        let all = storage.view()
+        self.parser.failure = ParseError(code = code, position = position, message = (str)all.bytes[message_start..],
+                                         entity = (str)all.bytes[encoding_end..<entity_end], encoding = (str)all.bytes[..<encoding_end])
+        return (str)all.bytes[entity_end..]
+
+## Where byte `offset` of `text` is: its line and column (in characters), both from 1.
+func locate(text: const u8[], offset: usize) -> Position:
+    var line: usize = 1
+    var column: usize = 1
+    var index: usize = 0
+    let end = offset if offset < text.length else text.length
+    while index < end:
+        let byte = text[index]
+        if byte == '\n' or (byte == '\r' and not (index + 1 < text.length and text[index + 1] == '\n')):
+            line += 1
+            column = 1
+        elif (byte & 0xC0) != 0x80 and byte != '\r':
+            column += 1
+        index += 1
+    return Position(line = line, column = column, offset = offset)

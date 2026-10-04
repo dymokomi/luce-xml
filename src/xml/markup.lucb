@@ -1,0 +1,85 @@
+#==============================================================================================
+#
+#   xml/markup - Comments, processing instructions, names and quoted literals
+#
+#   DESCRIPTION:
+#       The pieces of markup that look the same wherever they appear: comments ([15]),
+#       processing instructions ([16]), names that must be present, and quoted literals.
+#       Each reads from the top frame only and answers views of it.
+#
+#==============================================================================================
+
+## A comment, `<!--` at the position; answers its text.
+func read_comment(reader: Reader*) -> str!:
+    reader.advance(4)
+    let start = reader.position()
+    while not reader.at_end():
+        if reader.peek() == '-' and reader.peek_at(1) == '-':
+            if reader.peek_at(2) != '>':
+                error(malformed, try reader.complain("'--' inside a comment"))
+            let comment = reader.since(start)
+            reader.advance(3)
+            return comment
+        reader.advance(1)
+    error(malformed, try reader.complain("a comment is not closed with '-->'"))
+
+## A processing instruction, `<?` at the position; answers its target and data.
+func read_processing_instruction(reader: Reader*) -> (str, str)!:
+    reader.advance(2)
+    let target = reader.scan_name()
+    if target.length == 0:
+        error(malformed, try reader.complain("a processing instruction needs a target name"))
+    if same_label(target, "xml"):
+        if target == "xml" and reader.top() == 0:
+            error(malformed, try reader.complain("the XML declaration must be at the very start of the document"))
+        if target == "xml":
+            error(malformed, try reader.complain("a text declaration must be at the very start of its entity"))
+        error(malformed, try reader.complain(f"the processing instruction target '{target}' is reserved"))
+    if reader.options.namespaces and strings_contain(target, ':'):
+        error(malformed, try reader.complain(f"the processing instruction target '{target}' contains a colon"))
+    if reader.accept("?>"):
+        return (target, "")
+    if not reader.skip_spaces():
+        error(malformed, try reader.complain(f"expected white space or '?>' after the target '{target}'"))
+    let start = reader.position()
+    while not reader.at_end():
+        if reader.peek() == '?' and reader.peek_at(1) == '>':
+            let data = reader.since(start)
+            reader.advance(2)
+            return (target, data)
+        reader.advance(1)
+    error(malformed, try reader.complain(f"the processing instruction '{target}' is not closed with '?>'"))
+
+## A quoted literal at the position, without its quotes; `what` names it in errors.
+func read_quoted(reader: Reader*, what: str) -> str!:
+    let quote = reader.peek()
+    if quote != '"' and quote != '\'':
+        error(malformed, try reader.complain(f"expected a quoted value for {what}"))
+    reader.advance(1)
+    let start = reader.position()
+    while not reader.at_end():
+        if reader.peek() == quote:
+            let value = reader.since(start)
+            reader.advance(1)
+            return value
+        reader.advance(1)
+    error(malformed, try reader.complain(f"the quoted value for {what} is not closed"))
+
+## A name at the position, which must be there; `what` names it in errors.
+func expect_name(reader: Reader*, what: str) -> str!:
+    let found = reader.scan_name()
+    if found.length == 0:
+        error(malformed, try reader.complain(f"expected {what}"))
+    return found
+
+## White space at the position, which must be there; `what` says what follows it.
+func expect_spaces(reader: Reader*, what: str) -> !:
+    if not reader.skip_spaces():
+        error(malformed, try reader.complain(f"expected white space before {what}"))
+
+## Whether `text` holds `byte`.
+func strings_contain(text: str, byte: u8) -> bool:
+    for each in text.bytes:
+        if each == byte:
+            return true
+    return false

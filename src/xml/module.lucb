@@ -1,0 +1,238 @@
+#==============================================================================================
+#
+#   xml - A conforming, non-validating XML 1.0 + Namespaces parser
+#
+#   DESCRIPTION:
+#       Reads XML 1.0 (Fifth Edition) documents with Namespaces in XML 1.0 and streams
+#       what it finds to a `Listener` as `Event`s: the XML declaration, the document type
+#       declaration, element starts with their ordered attributes, element ends, text,
+#       CDATA sections, processing instructions and comments. Every well-formedness
+#       constraint is checked; the first one broken stops the parse with a `ParseError`
+#       that says where (line, column, byte offset) and what. The DTD's internal subset is
+#       read in full: general and parameter entities (expanded within a budget, so an
+#       "entity bomb" stops), attribute defaults and the attribute types that change how
+#       values are normalised. External entities and the external DTD subset are never
+#       fetched: the parser asks the listener for their bytes (`Listener.resolve`), and a
+#       listener that answers `none` has them skipped, as a non-validating processor may.
+#       Fragments, in ORDER:
+#
+#       module.lucb        the public types: names, attributes, events, the listener
+#       buffers.lucb       growable lists, byte strings, a text arena and a name table
+#       chars.lucb         XML's character classes and UTF-8 encoding
+#       decode.lucb        encodings: byte order marks, UTF-16, Latin-1, declarations
+#       reader.lucb        the reader's state, its input frames and error reporting
+#       parser.lucb        the public Parser and the document's prolog and epilogue
+#       markup.lucb        comments, processing instructions, names and literals
+#       content.lucb       element content: text, references, CDATA, end tags
+#       tags.lucb          start tags: attributes, defaults and their normalisation
+#       namespaces.lucb    namespace bindings and qualified names
+#       entities.lucb      entity references and loading external entities
+#       doctype.lucb       the DOCTYPE declaration and the DTD's subsets
+#       declarations.lucb  ENTITY, ATTLIST, ELEMENT and NOTATION declarations
+#
+#==============================================================================================
+
+import memory
+import io
+
+# mark: Errors ================================================================================
+
+## The document is not well-formed (or not namespace-well-formed): `Parser.failure` says
+## where and why.
+pub let malformed: ErrorCode = ErrorCode.package(1)
+
+## The document's bytes are in an encoding the parser does not decode (it decodes UTF-8,
+## UTF-16 with a byte order mark, ISO-8859-1 and US-ASCII). `ParseError.encoding` names
+## it; a caller that can decode it passes UTF-8 with `Options.assume_utf8`.
+pub let unsupported_encoding: ErrorCode = ErrorCode.package(2)
+
+## A limit in `Options` was reached: elements nested too deeply, or entity references
+## that expand too far (as in the "billion laughs" attack).
+pub let limit: ErrorCode = ErrorCode.package(3)
+
+## Where in a text the parser was: `line` and `column` count from 1, the column in
+## characters; `offset` is the byte offset from the start of the text (after decoding to
+## UTF-8, for a text in another encoding).
+pub struct Position:
+    pub var line: usize = 1
+    pub var column: usize = 1
+    pub var offset: usize = 0
+
+## Why and where a parse stopped.
+pub struct ParseError:
+    ## `malformed`, `unsupported_encoding` or `limit`.
+    pub var code: ErrorCode = malformed
+    pub var position: Position = Position()
+    ## What was wrong, in words meant for a person reading the document.
+    pub var message: str = ""
+    ## The system identifier of the external entity the position is in; "" for the
+    ## document itself.
+    pub var entity: str = ""
+    ## With `unsupported_encoding`, the encoding's name as the document gives it.
+    pub var encoding: str = ""
+
+# mark: Names and attributes ==================================================================
+
+## The namespace the `xml` prefix is bound to.
+pub let xml_namespace: str = "http://www.w3.org/XML/1998/namespace"
+
+## The namespace of `xmlns` and `xmlns:prefix` attributes.
+pub let xmlns_namespace: str = "http://www.w3.org/2000/xmlns/"
+
+## An element's or an attribute's name. `qualified` is the name as written; with
+## namespaces on, `prefix` and `local_name` are its parts and `namespace` the URI the prefix
+## (or, for an element, the default namespace) is bound to, "" for none. With namespaces
+## off, `local_name` is the whole name and `prefix` and `namespace` are "".
+pub struct Name:
+    pub var qualified: str = ""
+    pub var prefix: str = ""
+    pub var local_name: str = ""
+    pub var namespace: str = ""
+
+## An attribute of a start tag. `specified` is false for a default from an ATTLIST
+## declaration. Namespace declarations (`xmlns`, `xmlns:p`) are attributes too, in the
+## `xmlns_namespace`. `value` is normalised as XML 1.0 §3.3.3 says.
+pub struct Attribute:
+    pub var name: Name = Name()
+    pub var value: str = ""
+    pub var specified: bool = true
+
+## A start tag: the element's name and its attributes, those written first, in the order
+## written, then the defaults. `empty` when it was written as an empty-element tag,
+## `<name/>` (its `element_end` follows at once).
+pub struct Element:
+    pub var name: Name = Name()
+    pub var attributes: const Attribute[]
+    pub var empty: bool = false
+
+    ## The value of the attribute written `qualified`, if it has one.
+    pub func attribute(qualified: str) -> str?:
+        for attribute in self.attributes:
+            if attribute.name.qualified == qualified:
+                return attribute.value
+        return none
+
+# mark: The prolog ============================================================================
+
+## What the XML declaration says, and the document's text. `version` is "1.0" when there
+## is no declaration; `encoding` is the declared name or ""; `standalone` is none unless
+## declared. `source` is the whole document as UTF-8, its line ends normalised.
+pub struct Declaration:
+    pub var version: str = "1.0"
+    pub var encoding: str = ""
+    pub var standalone: bool? = none
+    pub var source: str = ""
+
+## A `<!NOTATION>` declaration.
+pub struct Notation:
+    pub var name: str = ""
+    pub var public_id: str? = none
+    pub var system_id: str? = none
+
+## The document type declaration: the root element's `name`, the external subset's
+## identifiers if any (the public one with its white space normalised), the internal
+## subset as written, and the notations both subsets declare.
+pub struct Doctype:
+    pub var name: str = ""
+    pub var public_id: str? = none
+    pub var system_id: str? = none
+    pub var internal_subset: str = ""
+    pub var notations: const Notation[]
+
+# mark: Events and the listener ===============================================================
+
+## What the parser found, in document order. Text, names and attributes are views that
+## stay valid only until the listener returns; a listener that keeps them copies them.
+pub enum Event:
+    ## The document begins; its XML declaration has been read.
+    document_start(declaration: const Declaration*)
+    ## The DOCTYPE, once both of its subsets have been read.
+    doctype(doctype: const Doctype*)
+    element_start(element: const Element*)
+    element_end(name: const Name*)
+    ## Character data, references resolved. Adjacent text arrives in one event, except
+    ## where an entity that holds markup begins or ends.
+    text(text: str)
+    ## The contents of a CDATA section.
+    cdata(text: str)
+    processing_instruction(target: str, data: str)
+    comment(text: str)
+    ## A well-formedness error stopped the parse; `parse` fails after this.
+    parse_error(failure: const ParseError*)
+    ## The document ended well-formed.
+    document_end
+
+## What `Listener.resolve` is asked for.
+pub enum EntityKind:
+    ## The DTD's external subset, from `<!DOCTYPE name SYSTEM "...">`.
+    document_type
+    ## An external parameter entity.
+    parameter
+    ## An external general entity referenced in content.
+    general
+    ## A general entity the document does not declare, where the document allows that
+    ## (it has an external subset or parameter entities, and is not standalone). The
+    ## answer is the entity's text as literal characters, never parsed as markup: this
+    ## is how a browser gives XHTML documents HTML's named characters, `&nbsp;` and the
+    ## rest.
+    named
+
+## An entity the parser needs the text of. For external ones, `system_id` is as written
+## and `base` is the system identifier of the entity whose declaration names it ("" for
+## the document), to resolve a relative one against.
+pub struct EntityRequest:
+    pub var kind: EntityKind = EntityKind.general
+    ## The entity's name; for the external subset, the DOCTYPE's name.
+    pub var name: str = ""
+    pub var public_id: str? = none
+    pub var system_id: str = ""
+    pub var base: str = ""
+
+## Receives a document's events, and supplies the entities the parser never fetches.
+pub interface Listener:
+    ## Handle the next event. A failure stops the parse and `parse` fails with it.
+    mutating func event(event: Event) -> !
+
+    ## The bytes of the entity `request` names (an external entity in any encoding the
+    ## parser decodes, a text declaration first if it has one; for `named`, UTF-8
+    ## characters), or `none` to skip it. The bytes must stay valid until `parse`
+    ## returns.
+    mutating func resolve(request: const EntityRequest*) -> const u8[]?
+
+## A listener that ignores every event and resolves nothing: parsing with it checks that
+## a document is well-formed.
+pub struct Checker: Listener:
+    var events: usize = 0
+
+    pub mutating func event(event: Event) -> !:
+        discard(event)
+        self.events += 1
+
+    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
+        discard(request)
+        return none
+
+# mark: Options ===============================================================================
+
+## How to parse.
+pub struct Options:
+    ## Process namespaces: resolve prefixes, and reject documents that are not
+    ## namespace-well-formed. Off, names are reported as written.
+    pub var namespaces: bool = true
+    ## The caller has decoded the document to UTF-8 already (a browser does, from the
+    ## transport's charset): ignore the encoding the document declares.
+    pub var assume_utf8: bool = false
+    ## The deepest elements may nest.
+    pub var max_depth: usize = 5000
+    ## The most bytes entity references may expand to in all, in content and attribute
+    ## values together.
+    pub var max_expansion: usize = 16777216
+    ## The deepest entity references may nest inside one another.
+    pub var max_entity_depth: usize = 64
+
+## Write `failure` as `line:column: message` (with the entity, when it is not the
+## document) to `sink`.
+pub func describe(failure: const ParseError*, sink: io.Writer) -> !:
+    if failure.entity.length > 0:
+        discard(try sink.write(f"{failure.entity}:"))
+    discard(try sink.write(f"{failure.position.line}:{failure.position.column}: {failure.message}"))

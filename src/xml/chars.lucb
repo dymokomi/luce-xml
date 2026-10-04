@@ -1,0 +1,163 @@
+#==============================================================================================
+#
+#   xml/chars - XML's character classes and UTF-8
+#
+#   DESCRIPTION:
+#       The productions of XML 1.0 (Fifth Edition) §2.2 and §2.3 as predicates on Unicode
+#       scalars: `Char`, white space, `NameStartChar` and `NameChar` (the Fifth Edition's
+#       broad ranges, not the older editions' tables), and the characters of public
+#       identifiers. Text reaches the reader as valid UTF-8, so `decode_utf8` needs no
+#       checks of its own; `encode_utf8` writes character references back out.
+#
+#==============================================================================================
+
+# mark: Character classes =====================================================================
+
+## Whether `scalar` is a `Char` (XML 1.0 [2]).
+func is_char(scalar: u32) -> bool:
+    if scalar < 0x20:
+        return scalar == 0x9 or scalar == 0xA or scalar == 0xD
+    if scalar <= 0xD7FF:
+        return true
+    if scalar < 0xE000:
+        return false
+    if scalar <= 0xFFFD:
+        return true
+    return scalar >= 0x10000 and scalar <= 0x10FFFF
+
+## Whether `byte` is XML white space (`S`, [3]).
+func is_space(byte: u8) -> bool:
+    return byte == ' ' or byte == '\n' or byte == '\t' or byte == '\r'
+
+## Whether `scalar` may begin a name ([4]). The colon is included, as the grammar has it;
+## namespaces narrow names further.
+func is_name_start(scalar: u32) -> bool:
+    if scalar < 0x80:
+        let byte = (u8)scalar
+        return (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or byte == '_' or byte == ':'
+    if scalar < 0xC0:
+        return false
+    if scalar <= 0x2FF:
+        return scalar != 0xD7 and scalar != 0xF7
+    if scalar < 0x370:
+        return false
+    if scalar <= 0x1FFF:
+        return scalar != 0x37E
+    if scalar == 0x200C or scalar == 0x200D:
+        return true
+    if scalar >= 0x2070 and scalar <= 0x218F:
+        return true
+    if scalar >= 0x2C00 and scalar <= 0x2FEF:
+        return true
+    if scalar >= 0x3001 and scalar <= 0xD7FF:
+        return true
+    if scalar >= 0xF900 and scalar <= 0xFDCF:
+        return true
+    if scalar >= 0xFDF0 and scalar <= 0xFFFD:
+        return true
+    return scalar >= 0x10000 and scalar <= 0xEFFFF
+
+## Whether `scalar` may continue a name ([4a]).
+func is_name_char(scalar: u32) -> bool:
+    if is_name_start(scalar):
+        return true
+    if scalar < 0x80:
+        let byte = (u8)scalar
+        return byte == '-' or byte == '.' or (byte >= '0' and byte <= '9')
+    return scalar == 0xB7 or (scalar >= 0x300 and scalar <= 0x36F) or scalar == 0x203F or scalar == 0x2040
+
+## Whether `byte` may appear in a public identifier ([13] PubidChar).
+func is_pubid_char(byte: u8) -> bool:
+    if (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or (byte >= '0' and byte <= '9'):
+        return true
+    if byte == ' ' or byte == '\r' or byte == '\n':
+        return true
+    for allowed in "-'()+,./:=?;!*#@$_%".bytes:
+        if byte == allowed:
+            return true
+    return false
+
+## Whether `text` is a name ([5]); with `colons` false, a name without colons (an NCName).
+func is_name(text: str, colons: bool) -> bool:
+    if text.length == 0:
+        return false
+    var position: usize = 0
+    while position < text.length:
+        let (scalar, size) = decode_utf8(text.bytes, position)
+        if position == 0 and not is_name_start(scalar):
+            return false
+        if not is_name_char(scalar) or (scalar == 0x3A and not colons):
+            return false
+        position += size
+    return true
+
+# mark: UTF-8 =================================================================================
+
+## The scalar that starts at `position` in valid UTF-8 `data`, and its length in bytes.
+func decode_utf8(data: const u8[], position: usize) -> (u32, usize):
+    let lead = data[position]
+    if lead < 0x80:
+        return ((u32)lead, 1)
+    if lead < 0xE0:
+        return ((((u32)lead & 0x1F) << 6) | ((u32)data[position + 1] & 0x3F), 2)
+    if lead < 0xF0:
+        return ((((u32)lead & 0x0F) << 12) | (((u32)data[position + 1] & 0x3F) << 6) | ((u32)data[position + 2] & 0x3F), 3)
+    let high = (((u32)lead & 0x07) << 18) | (((u32)data[position + 1] & 0x3F) << 12)
+    return (high | (((u32)data[position + 2] & 0x3F) << 6) | ((u32)data[position + 3] & 0x3F), 4)
+
+## Write `scalar` as UTF-8 at the start of `target` (which has room for four bytes);
+## answer how many bytes it took.
+func encode_utf8(scalar: u32, target: u8[]) -> usize:
+    if scalar < 0x80:
+        target[0] = (u8)scalar
+        return 1
+    if scalar < 0x800:
+        target[0] = (u8)(0xC0 | (scalar >> 6))
+        target[1] = (u8)(0x80 | (scalar & 0x3F))
+        return 2
+    if scalar < 0x10000:
+        target[0] = (u8)(0xE0 | (scalar >> 12))
+        target[1] = (u8)(0x80 | ((scalar >> 6) & 0x3F))
+        target[2] = (u8)(0x80 | (scalar & 0x3F))
+        return 3
+    target[0] = (u8)(0xF0 | (scalar >> 18))
+    target[1] = (u8)(0x80 | ((scalar >> 12) & 0x3F))
+    target[2] = (u8)(0x80 | ((scalar >> 6) & 0x3F))
+    target[3] = (u8)(0x80 | (scalar & 0x3F))
+    return 4
+
+## The length of the valid UTF-8 sequence starting at `position` of `data` if it encodes
+## a scalar (no overlong forms, no surrogates, nothing past U+10FFFF), else 0.
+func utf8_length(data: const u8[], position: usize) -> usize:
+    let lead = data[position]
+    if lead < 0x80:
+        return 1
+    var size: usize = 0
+    var low: u8 = 0x80
+    var high: u8 = 0xBF
+    if lead >= 0xC2 and lead <= 0xDF:
+        size = 2
+    elif lead >= 0xE0 and lead <= 0xEF:
+        size = 3
+        if lead == 0xE0:
+            low = 0xA0
+        elif lead == 0xED:
+            high = 0x9F
+    elif lead >= 0xF0 and lead <= 0xF4:
+        size = 4
+        if lead == 0xF0:
+            low = 0x90
+        elif lead == 0xF4:
+            high = 0x8F
+    else:
+        return 0
+    if position + size > data.length:
+        return 0
+    let second = data[position + 1]
+    if second < low or second > high:
+        return 0
+    for index in 2..<size:
+        let next = data[position + index]
+        if next < 0x80 or next > 0xBF:
+            return 0
+    return size

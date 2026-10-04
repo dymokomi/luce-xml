@@ -1,0 +1,50 @@
+#==============================================================================================
+#
+#   tests/xml/limits - Entity bombs and deep nesting stop with `limit`
+#
+#==============================================================================================
+
+## The code a parse of `source` fails with, or none.
+func failure_code(source: str, options: Options = Options()) -> ErrorCode?:
+    var parser = Parser(options = options)
+    defer parser.release()
+    var checker = Checker()
+    parser.parse(source.bytes, &checker) catch failure:
+        return failure.code
+    return none
+
+test "a billion laughs stops early":
+    let bomb = """<!DOCTYPE lolz [
+<!ENTITY lol "lol">
+<!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+<!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">
+<!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+<!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+<!ENTITY lol5 "&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;">
+<!ENTITY lol6 "&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;">
+<!ENTITY lol7 "&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;">
+<!ENTITY lol8 "&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;">
+<!ENTITY lol9 "&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;">
+]>
+<lolz a="&lol9;">&lol9;</lolz>"""
+    assert(failure_code(bomb) == limit)
+
+test "the expansion budget is an option":
+    var options = Options()
+    options.max_expansion = 10
+    let source = "<!DOCTYPE d [<!ENTITY e '0123456789'>]><d>&e;&e;</d>"
+    assert(failure_code(source) == none)
+    assert(failure_code(source, options) == limit)
+
+test "elements may nest only so deep":
+    var options = Options()
+    options.max_depth = 3
+    assert(failure_code("<a><b><c/></b></a>", options) == none)
+    assert(failure_code("<a><b><c><d/></c></b></a>", options) == limit)
+
+test "entity references may nest only so deep":
+    var options = Options()
+    options.max_entity_depth = 2
+    let source = "<!DOCTYPE d [<!ENTITY a 'x'><!ENTITY b '&a;'><!ENTITY c '&b;'>]><d>&c;</d>"
+    assert(failure_code(source) == none)
+    assert(failure_code(source, options) == limit)

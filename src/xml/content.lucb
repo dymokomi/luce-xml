@@ -1,0 +1,170 @@
+#==============================================================================================
+#
+#   xml/content - Element content: text, references, CDATA sections and end tags
+#
+#   DESCRIPTION:
+#       The root element and everything inside it ([39], [43]). The loop reads the top
+#       frame: markup is handed to its reader, references expand (an entity's text is
+#       pushed as a frame and read in turn), and character data is gathered into one run
+#       that is sent as a single `text` event when markup interrupts it. A run lying in
+#       one frame is sent as a view of it; one assembled from several pieces (a
+#       character reference, an entity's text) is copied into `Reader.text` first.
+#
+#       Elements must nest within entities as within the document: an end tag closes
+#       only an element whose start tag is in the same frame, and an entity's text must
+#       close every element it opens.
+#
+#==============================================================================================
+
+## The root element at the position, through its end tag.
+func read_content(reader: Reader*) -> !:
+    try read_start_tag(reader)
+    while reader.open.used > 0:
+        if reader.at_end():
+            if reader.top() == 0:
+                let open = &reader.open.items[reader.open.used - 1]
+                error(malformed, try reader.complain(f"the element <{open.name.qualified}> is not closed"))
+            try end_entity(reader)
+            continue
+        let byte = reader.peek()
+        if byte == '<':
+            try flush_text(reader)
+            let next = reader.peek_at(1)
+            if next == '/':
+                try read_end_tag(reader)
+            elif next == '?':
+                let (target, data) = try read_processing_instruction(reader)
+                try reader.listener.event(.processing_instruction(target, data))
+            elif next == '!':
+                if reader.looking_at("<!--"):
+                    let comment = try read_comment(reader)
+                    try reader.listener.event(.comment(comment))
+                elif reader.looking_at("<![CDATA["):
+                    try read_cdata(reader)
+                else:
+                    error(malformed, try reader.complain("'<!' in content must begin a comment or a CDATA section"))
+            else:
+                try read_start_tag(reader)
+        elif byte == '&':
+            try read_content_reference(reader)
+        else:
+            try read_characters(reader)
+
+## Character data up to the next markup or reference ([14]); `]]>` may not appear in it.
+func read_characters(reader: Reader*) -> !:
+    let frame = &reader.frames.items[reader.frames.used - 1]
+    let data = frame.text.bytes
+    let start = frame.pos
+    var index = start
+    while index < data.length:
+        let byte = data[index]
+        if byte == '<' or byte == '&':
+            break
+        if byte == ']' and index + 2 < data.length and data[index + 1] == ']' and data[index + 2] == '>':
+            frame.pos = index
+            error(malformed, try reader.complain("']]>' in text must be written ']]&gt;'"))
+        index += 1
+    frame.pos = index
+    try add_run(reader, start, index)
+
+## A CDATA section ([18]), `<![CDATA[` at the position.
+func read_cdata(reader: Reader*) -> !:
+    reader.advance(9)
+    let start = reader.position()
+    while not reader.at_end():
+        if reader.looking_at("]]>"):
+            let section = reader.since(start)
+            reader.advance(3)
+            try reader.listener.event(.cdata(section))
+            return
+        reader.advance(1)
+    error(malformed, try reader.complain("a CDATA section is not closed with ']]>'"))
+
+## An end tag ([42]), `</` at the position, which must close the innermost open element.
+func read_end_tag(reader: Reader*) -> !:
+    let start = reader.position()
+    reader.advance(2)
+    let found = reader.scan_name()
+    if found.length == 0:
+        error(malformed, try reader.complain("expected an element name after '</'"))
+    discard(reader.skip_spaces())
+    if not reader.accept(">"):
+        error(malformed, try reader.complain(f"expected '>' to end the end tag </{found}>"))
+    let open = reader.open.items[reader.open.used - 1]
+    if open.name.qualified != found:
+        reader.rewind(start)
+        error(malformed, try reader.complain(f"the end tag </{found}> does not match the start tag <{open.name.qualified}>"))
+    if open.frame != reader.top():
+        reader.rewind(start)
+        error(malformed, try reader.complain(f"the end tag </{found}> is in a different entity than its start tag"))
+    try reader.listener.event(.element_end(&open.name))
+    reader.bindings.used = open.bindings
+    reader.open.used -= 1
+
+## The top frame, an entity's text, has ended: it must have closed what it opened.
+func end_entity(reader: Reader*) -> !:
+    let top = reader.top()
+    let frame = reader.frames.items[top]
+    let entity = &reader.entities.items[frame.entity - 1]
+    if reader.open.used > frame.depth:
+        let open = &reader.open.items[reader.open.used - 1]
+        error(malformed, try reader.complain(f"the entity '{entity.name}' ends inside the element <{open.name.qualified}> it started"))
+    if reader.run_pending and not reader.run_built and reader.run_frame == top:
+        try spill_run(reader)
+    entity.expanding = false
+    reader.frames.used -= 1
+
+# mark: Text runs =============================================================================
+
+## Add bytes `start..<end` of the top frame to the pending text.
+func add_run(reader: Reader*, start: usize, end: usize) -> !:
+    if start == end:
+        return
+    let top = reader.top()
+    if not reader.run_pending:
+        reader.run_pending = true
+        reader.run_built = false
+        reader.run_frame = top
+        reader.run_start = start
+        reader.run_end = end
+    elif not reader.run_built and reader.run_frame == top and reader.run_end == start:
+        reader.run_end = end
+    else:
+        try spill_run(reader)
+        try reader.text.add_all(reader.frames.items[top].text.bytes[start..<end])
+
+## Add `scalar` to the pending text.
+func add_text_scalar(reader: Reader*, scalar: u32) -> !:
+    try spill_run(reader)
+    try reader.text.add_scalar(scalar)
+
+## Add the characters `data` to the pending text.
+func add_text_bytes(reader: Reader*, data: const u8[]) -> !:
+    try spill_run(reader)
+    try reader.text.add_all(data)
+
+## Make the pending text a copy in `Reader.text` (empty if there was none).
+func spill_run(reader: Reader*) -> !:
+    if not reader.run_pending:
+        reader.run_pending = true
+        reader.run_built = true
+        reader.text.clear()
+        return
+    if reader.run_built:
+        return
+    reader.text.clear()
+    let frame = &reader.frames.items[reader.run_frame]
+    try reader.text.add_all(frame.text.bytes[reader.run_start..<reader.run_end])
+    reader.run_built = true
+
+## Send the pending text, if any.
+func flush_text(reader: Reader*) -> !:
+    if not reader.run_pending:
+        return
+    reader.run_pending = false
+    if reader.run_built:
+        if reader.text.used > 0:
+            try reader.listener.event(.text(reader.text.view()))
+        return
+    let frame = &reader.frames.items[reader.run_frame]
+    try reader.listener.event(.text((str)frame.text.bytes[reader.run_start..<reader.run_end]))

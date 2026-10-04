@@ -1,0 +1,176 @@
+#==============================================================================================
+#
+#   xml/parser - The public Parser, and a document's prolog and epilogue
+#
+#   DESCRIPTION:
+#       `Parser.parse` decodes the document, reads its XML declaration, the prolog's
+#       comments, processing instructions and DOCTYPE, the root element (content.lucb)
+#       and the epilogue, sending events to the listener as it goes. A well-formedness
+#       error is recorded in `Parser.failure`, sent to the listener as an `error` event,
+#       and returned as the parse's failure.
+#
+#==============================================================================================
+
+## Parses documents. Keep one to parse many: `failure` describes the last parse's error,
+## valid until the next parse or `release`.
+pub struct Parser:
+    pub var options: Options = Options()
+    ## Why the last `parse` failed, when the document was at fault (not the listener).
+    pub var failure: ParseError? = none
+    var storage: Bytes = Bytes()
+
+    ## Parse `source`, a whole document in UTF-8, UTF-16, ISO-8859-1 or US-ASCII (or
+    ## already UTF-8 under `Options.assume_utf8`), sending its events to `listener`.
+    ## Fails with `malformed`, `unsupported_encoding` or `limit` (then `failure` says
+    ## where and why), or with the listener's own failure.
+    pub mutating func parse(source: const u8[], listener: Listener) -> !:
+        self.failure = none
+        var reader = Reader(listener = listener, options = self.options, parser = &self)
+        defer reader.release()
+        read_document(&reader, source) catch problem:
+            if let found = self.failure:
+                reader.listener.event(.parse_error(&found)) catch ignored:
+                    discard(ignored)
+                    recover ()
+            error(problem.code, problem.message)
+
+    ## Free the storage `failure` refers to.
+    pub mutating func release():
+        self.failure = none
+        self.storage.release()
+
+## Whether `source` is a well-formed (and namespace-well-formed) document, with external
+## entities not read.
+pub func check(source: const u8[]) -> bool:
+    var parser = Parser()
+    defer parser.release()
+    var checker = Checker()
+    parser.parse(source, &checker) catch problem:
+        discard(problem)
+        return false
+    return true
+
+# mark: The document ==========================================================================
+
+## document ::= prolog element Misc* ([1]).
+func read_document(reader: Reader*, source: const u8[]) -> !:
+    let text = try decode_entity(reader, source, true, "")
+    reader.frames.used = 0
+    reader.document = text
+    try reader.frames.push(Frame(text = text))
+    try read_xml_declaration(reader, true)
+    reader.declaration.source = text
+    try reader.listener.event(.document_start(&reader.declaration))
+    try read_misc(reader)
+    if reader.looking_at("<!DOCTYPE"):
+        try read_doctype(reader)
+        try read_misc(reader)
+    if reader.peek() != '<' or reader.at_end():
+        if reader.at_end():
+            error(malformed, try reader.complain("the document has no root element"))
+        error(malformed, try reader.complain("expected the root element"))
+    if reader.looking_at("<!DOCTYPE"):
+        error(malformed, try reader.complain("a second DOCTYPE"))
+    if reader.looking_at("<!"):
+        error(malformed, try reader.complain("expected the root element"))
+    try read_content(reader)
+    try read_misc(reader)
+    if not reader.at_end():
+        error(malformed, try reader.complain("markup after the root element; a document has one root element"))
+    try reader.listener.event(.document_end)
+
+## Misc* ([27]): white space, comments and processing instructions around the root
+## element. Stops at anything else.
+func read_misc(reader: Reader*) -> !:
+    while not reader.at_end():
+        if is_space(reader.peek()):
+            discard(reader.skip_spaces())
+        elif reader.looking_at("<!--"):
+            let comment = try read_comment(reader)
+            try reader.listener.event(.comment(comment))
+        elif reader.looking_at("<?"):
+            let (target, data) = try read_processing_instruction(reader)
+            try reader.listener.event(.processing_instruction(target, data))
+        elif reader.peek() == '<':
+            return
+        elif reader.peek() == '&':
+            error(malformed, try reader.complain("a reference outside the root element"))
+        else:
+            error(malformed, try reader.complain("text outside the root element"))
+
+# mark: XML and text declarations =============================================================
+
+## The XML declaration ([23]) at the start of the document, when `document`, else a text
+## declaration ([77]) at the start of an external entity. Either is optional.
+func read_xml_declaration(reader: Reader*, document: bool) -> !:
+    if not reader.looking_at("<?xml") or not is_space(reader.peek_at(5)):
+        return
+    reader.advance(5)
+    var spaced = reader.skip_spaces()
+    if reader.looking_at("version"):
+        reader.advance(7)
+        let version = try read_equals_value(reader, "version")
+        if not is_version(version):
+            error(malformed, try reader.complain(f"\"{version}\" is not an XML version; XML 1.0 documents say \"1.0\""))
+        if document:
+            reader.declaration.version = version
+        elif version != "1.0" and reader.declaration.version == "1.0":
+            error(malformed, try reader.complain(f"an XML 1.0 document cannot use an entity of XML version {version}"))
+        spaced = reader.skip_spaces()
+    elif document:
+        error(malformed, try reader.complain("the XML declaration must give the version first"))
+    if reader.looking_at("encoding"):
+        if not spaced:
+            error(malformed, try reader.complain("expected white space before 'encoding'"))
+        reader.advance(8)
+        let encoding = try read_equals_value(reader, "encoding")
+        if not is_encoding_name(encoding):
+            error(malformed, try reader.complain(f"\"{encoding}\" is not an encoding name"))
+        if document:
+            reader.declaration.encoding = encoding
+        spaced = reader.skip_spaces()
+    elif not document:
+        error(malformed, try reader.complain("a text declaration must name the encoding"))
+    if document and reader.looking_at("standalone"):
+        if not spaced:
+            error(malformed, try reader.complain("expected white space before 'standalone'"))
+        reader.advance(10)
+        let standalone = try read_equals_value(reader, "standalone")
+        if standalone != "yes" and standalone != "no":
+            error(malformed, try reader.complain("standalone must be \"yes\" or \"no\""))
+        reader.declaration.standalone = standalone == "yes"
+        reader.standalone = standalone == "yes"
+        discard(reader.skip_spaces())
+    if not reader.accept("?>"):
+        if document:
+            error(malformed, try reader.complain("expected '?>' to end the XML declaration"))
+        error(malformed, try reader.complain("expected '?>' to end the text declaration"))
+
+## `Eq` and a quoted value, after a pseudo-attribute's name.
+func read_equals_value(reader: Reader*, what: str) -> str!:
+    discard(reader.skip_spaces())
+    if not reader.accept("="):
+        error(malformed, try reader.complain(f"expected '=' after '{what}'"))
+    discard(reader.skip_spaces())
+    return try read_quoted(reader, what)
+
+## VersionNum ::= '1.' [0-9]+ ([26]).
+func is_version(version: str) -> bool:
+    if version.length < 3 or version.bytes[0] != '1' or version.bytes[1] != '.':
+        return false
+    for byte in version.bytes[2..]:
+        if byte < '0' or byte > '9':
+            return false
+    return true
+
+## EncName ::= [A-Za-z] ([A-Za-z0-9._] | '-')* ([81]).
+func is_encoding_name(name: str) -> bool:
+    if name.length == 0:
+        return false
+    for (index, byte) in name.bytes.indexed():
+        let letter = (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z')
+        if index == 0 and not letter:
+            return false
+        if not letter and not (byte >= '0' and byte <= '9') and byte != '.' and byte != '_' and byte != '-':
+            return false
+    return true

@@ -1,0 +1,148 @@
+#==============================================================================================
+#
+#   tests/xml/recorder - A listener that writes what it hears, for the tests
+#
+#   DESCRIPTION:
+#       `Recorder` writes each event as markup into a string the tests compare: start tags
+#       with their attributes in the order given (defaults marked with a `~` after the
+#       name), text with `&`, `<`, `>` and line ends escaped, and the rest as written.
+#       With `spaces` it writes names as `{namespace}local`. It answers entity requests
+#       from a small table of system identifiers. `parse_to` runs a parse and answers the
+#       record, or `error L:C: message` when the parse fails.
+#
+#==============================================================================================
+
+## An external entity the recorder supplies.
+struct Supplied:
+    var system_id: str = ""
+    var text: str = ""
+
+struct Recorder: Listener:
+    var out: Bytes = Bytes()
+    var spaces: bool = false
+    var supplied: List[Supplied] = List[Supplied]()
+    var named: bool = false
+    var requests: Bytes = Bytes()
+
+    pub mutating func event(event: Event) -> !:
+        match event:
+            .document_start(declaration):
+                discard(declaration)
+            .doctype(doctype):
+                discard(try self.out.write(f"<!DOCTYPE {doctype.name}"))
+                if let public_id = doctype.public_id:
+                    discard(try self.out.write(f" PUBLIC \"{public_id}\""))
+                if let system_id = doctype.system_id:
+                    discard(try self.out.write(f" \"{system_id}\""))
+                for notation in doctype.notations:
+                    discard(try self.out.write(f" N:{notation.name}"))
+                try self.out.add_all(">".bytes)
+            .element_start(element):
+                try self.out.add('<')
+                try self.name(&element.name)
+                for attribute in element.attributes:
+                    try self.out.add(' ')
+                    try self.name(&attribute.name)
+                    if not attribute.specified:
+                        try self.out.add('~')
+                    try self.out.add_all("=\"".bytes)
+                    try self.escaped(attribute.value)
+                    try self.out.add('"')
+                if element.empty:
+                    try self.out.add('/')
+                try self.out.add('>')
+            .element_end(name):
+                try self.out.add_all("</".bytes)
+                try self.name(name)
+                try self.out.add('>')
+            .text(text):
+                try self.escaped(text)
+            .cdata(text):
+                discard(try self.out.write(f"<![CDATA[{text}]]>"))
+            .processing_instruction(target, data):
+                discard(try self.out.write(f"<?{target} {data}?>"))
+            .comment(text):
+                discard(try self.out.write(f"<!--{text}-->"))
+            .parse_error(failure):
+                discard(failure)
+            .document_end:
+                return
+
+    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
+        let noted = self.requests.write(f"[{request.name}:{request.system_id}]") else 0
+        discard(noted)
+        if request.kind == EntityKind.named:
+            if self.named and request.name == "nbsp":
+                return "\u{A0}".bytes
+            return none
+        for each in self.supplied.view():
+            if each.system_id == request.system_id:
+                return each.text.bytes
+        return none
+
+    mutating func name(name: const Name*) -> !:
+        if self.spaces and name.namespace.length > 0:
+            discard(try self.out.write(f"{{{name.namespace}}}{name.local_name}"))
+            return
+        try self.out.add_all(name.qualified.bytes)
+
+    mutating func escaped(text: str) -> !:
+        for byte in text.bytes:
+            if byte == '&':
+                try self.out.add_all("&amp;".bytes)
+            elif byte == '<':
+                try self.out.add_all("&lt;".bytes)
+            elif byte == '>':
+                try self.out.add_all("&gt;".bytes)
+            elif byte == '\n':
+                try self.out.add_all("&#10;".bytes)
+            elif byte == '\r':
+                try self.out.add_all("&#13;".bytes)
+            elif byte == '\t':
+                try self.out.add_all("&#9;".bytes)
+            else:
+                try self.out.add(byte)
+
+    mutating func release():
+        self.out.release()
+        self.supplied.release()
+        self.requests.release()
+
+## The record of parsing `source` with `recorder`; `error L:C: message` on failure.
+func record(source: str, recorder: Recorder*, options: Options = Options()) -> str!:
+    var parser = Parser(options = options)
+    defer parser.release()
+    parser.parse(source.bytes, recorder) catch failure:
+        recorder.out.clear()
+        if let found = parser.failure:
+            discard(try recorder.out.write(f"error {found.position.line}:{found.position.column}: {found.message}"))
+        else:
+            discard(try recorder.out.write(f"failed {failure.message}"))
+    return recorder.out.view()
+
+## Expect parsing `source` to record `expected`.
+func expect_record(source: str, expected: str, options: Options = Options()) -> !:
+    var recorder = Recorder()
+    defer recorder.release()
+    let actual = try record(source, &recorder, options)
+    if actual != expected:
+        print(f"source:   {source}\nexpected: {expected}\nactual:   {actual}")
+        trap("the record differs")
+
+## Expect parsing `source` to fail with a message containing `fragment`.
+func expect_failure(source: str, fragment: str, options: Options = Options()) -> !:
+    var recorder = Recorder()
+    defer recorder.release()
+    let actual = try record(source, &recorder, options)
+    if not (actual.length >= 6 and (str)actual.bytes[..<6] == "error ") or not has_text(actual, fragment):
+        print(f"source:   {source}\nexpected an error with: {fragment}\nactual:   {actual}")
+        trap("the parse did not fail as expected")
+
+## Whether `text` contains `fragment`.
+func has_text(text: str, fragment: str) -> bool:
+    if fragment.length > text.length:
+        return false
+    for start in 0..=text.length - fragment.length:
+        if (str)text.bytes[start..<start + fragment.length] == fragment:
+            return true
+    return false

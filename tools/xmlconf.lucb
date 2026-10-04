@@ -1,0 +1,324 @@
+#==============================================================================================
+#
+#   tools/xmlconf - Parse a list of documents, writing their canonical forms
+#
+#   DESCRIPTION:
+#       The Luce half of the conformance runner (xmlconf.py) and the fuzzer (fuzz.py).
+#       Usage: `xmlconf LIST OUTDIR`. Each line of LIST is `FLAGS PATH`, FLAGS a word of
+#       letters (or `-` for none): `n` parses with namespaces off, `u` takes the document
+#       as UTF-8 already (it was transcoded), `x` leaves external entities unread. For the
+#       Nth line it prints `N ok`, `N encoding LABEL` or `N error CODE LINE:COLUMN
+#       MESSAGE`, and for a well-formed document writes its canonical form (James
+#       Clark's, the form the W3C suite's expected outputs are in; the second form, with
+#       notations, when the DTD declares any) to OUTDIR/N.xml. External entities are read
+#       from files, their system identifiers relative to the entity that declares them.
+#
+#==============================================================================================
+
+import c
+import memory
+import xml
+
+extern func fopen(path: c.str, mode: c.str) -> void*?
+extern func fclose(file: void*) -> i32
+extern func fread(data: void*, size: usize, count: usize, file: void*) -> usize
+extern func fwrite(data: const void*, size: usize, count: usize, file: void*) -> usize
+extern func fflush(file: void*?) -> i32
+
+# mark: Files =================================================================================
+
+## A growable byte buffer.
+struct Buffer:
+    var items: u8[]
+    var used: usize = 0
+
+    mutating func add_all(data: const u8[]) -> !:
+        if self.used + data.length > self.items.length:
+            var size = 256 if self.items.length == 0 else self.items.length * 2
+            while size < self.used + data.length:
+                size *= 2
+            let larger = try alloc u8[size] in memory.heap
+            memory.copy(larger, self.items, self.used)
+            if self.items.length > 0:
+                free(self.items) in memory.heap
+            self.items = larger
+        memory.copy(self.items[self.used..], data, data.length)
+        self.used += data.length
+
+    mutating func add(byte: u8) -> !:
+        var one: u8[1]
+        one[0] = byte
+        try self.add_all(one)
+
+    func view() -> u8[]:
+        return self.items[..<self.used]
+
+    mutating func release():
+        if self.items.length > 0:
+            free(self.items) in memory.heap
+        var empty: u8[]
+        self.items = empty
+        self.used = 0
+
+## The bytes of the file at `path`, or none if it cannot be read.
+func read_file(path: str) -> u8[]?:
+    var name = Buffer()
+    defer name.release()
+    name.add_all(path.bytes) catch failure:
+        discard(failure)
+        return none
+    name.add(0) catch failure:
+        discard(failure)
+        return none
+    let file = fopen((c.str)(str)name.view(), "rb") else return none
+    defer discard(fclose(file))
+    var contents = Buffer()
+    var chunk: u8[65536]
+    while true:
+        let count = fread(&chunk[0], 1, 65536, file)
+        if count == 0:
+            break
+        contents.add_all(chunk[..<count]) catch failure:
+            discard(failure)
+            contents.release()
+            return none
+    defer contents.release()
+    let exact = (alloc u8[contents.used] in memory.heap) else return none
+    memory.copy(exact, contents.items, contents.used)
+    return exact
+
+## Write `data` to the file at `path`.
+func write_file(path: str, data: const u8[]) -> !:
+    var name = Buffer()
+    defer name.release()
+    try name.add_all(path.bytes)
+    try name.add(0)
+    let file = fopen((c.str)(str)name.view(), "wb") else error(memory.exhausted, "cannot write a file")
+    if data.length > 0:
+        discard(fwrite(&data[0], 1, data.length, file))
+    discard(fclose(file))
+
+## The directory part of `path`, with its slash; "" if it has none.
+func directory_of(path: str) -> str:
+    var index = path.length
+    while index > 0:
+        index -= 1
+        if path.bytes[index] == '/':
+            return (str)path.bytes[..<index + 1]
+    return ""
+
+# mark: The canonical listener ================================================================
+
+## An external entity the listener has read: its system identifier and its path.
+struct Loaded:
+    var system_id: str
+    var path: str
+    var bytes: u8[]
+
+## Writes James Clark's canonical form of a document, and reads external entities.
+struct Canonical: xml.Listener:
+    var out: Buffer = Buffer()
+    var paths: Buffer = Buffer()
+    var loaded: Loaded[256]
+    var loaded_count: usize = 0
+    var directory: str = ""
+    var externals: bool = true
+    var order: usize[1024]
+
+    pub mutating func event(event: xml.Event) -> !:
+        match event:
+            .doctype(doctype):
+                try self.notations(doctype)
+            .element_start(element):
+                try self.out.add('<')
+                try self.out.add_all(element.name.qualified.bytes)
+                try self.attributes(element.attributes)
+                try self.out.add('>')
+            .element_end(name):
+                try self.out.add_all("</".bytes)
+                try self.out.add_all(name.qualified.bytes)
+                try self.out.add('>')
+            .text(text):
+                try self.escaped(text)
+            .cdata(text):
+                try self.escaped(text)
+            .processing_instruction(target, data):
+                try self.out.add_all("<?".bytes)
+                try self.out.add_all(target.bytes)
+                try self.out.add(' ')
+                try self.out.add_all(data.bytes)
+                try self.out.add_all("?>".bytes)
+            _:
+                return
+
+    pub mutating func resolve(request: const xml.EntityRequest*) -> const u8[]?:
+        if request.kind == xml.EntityKind.named or not self.externals:
+            return none
+        var base = self.directory
+        for index in 0..<self.loaded_count:
+            if self.loaded[index].system_id == request.base:
+                base = directory_of(self.loaded[index].path)
+        if self.loaded_count >= 256:
+            return none
+        let start = self.paths.used
+        self.paths.add_all(base.bytes) catch failure:
+            discard(failure)
+            return none
+        self.paths.add_all(request.system_id.bytes) catch failure:
+            discard(failure)
+            return none
+        let path = (str)self.paths.items[start..<self.paths.used]
+        let bytes = read_file(path) else return none
+        self.loaded[self.loaded_count] = Loaded(system_id = request.system_id, path = path, bytes = bytes)
+        self.loaded_count += 1
+        return bytes
+
+    ## The attributes sorted by name, as the canonical form has them.
+    mutating func attributes(attributes: const xml.Attribute[]) -> !:
+        let count = attributes.length if attributes.length < 1024 else 1024
+        for index in 0..<count:
+            self.order[index] = index
+        for index in 1..<count:
+            var at = index
+            while at > 0 and attributes[self.order[at - 1]].name.qualified > attributes[self.order[at]].name.qualified:
+                let swap = self.order[at]
+                self.order[at] = self.order[at - 1]
+                self.order[at - 1] = swap
+                at -= 1
+        for index in 0..<count:
+            let attribute = attributes[self.order[index]]
+            try self.out.add(' ')
+            try self.out.add_all(attribute.name.qualified.bytes)
+            try self.out.add_all("=\"".bytes)
+            try self.escaped(attribute.value)
+            try self.out.add('"')
+
+    ## The second canonical form's DOCTYPE, when the DTD declares notations.
+    mutating func notations(doctype: const xml.Doctype*) -> !:
+        if doctype.notations.length == 0:
+            return
+        try self.out.add_all("<!DOCTYPE ".bytes)
+        try self.out.add_all(doctype.name.bytes)
+        try self.out.add_all(" [\n".bytes)
+        var written: usize = 0
+        var last = ""
+        while written < doctype.notations.length:
+            var next: usize = 0
+            var found = false
+            for (index, notation) in doctype.notations.indexed():
+                if written > 0 and notation.name <= last:
+                    continue
+                if not found or notation.name < doctype.notations[next].name:
+                    next = index
+                    found = true
+            let notation = doctype.notations[next]
+            last = notation.name
+            written += 1
+            try self.out.add_all("<!NOTATION ".bytes)
+            try self.out.add_all(notation.name.bytes)
+            if let public_id = notation.public_id:
+                try self.out.add_all(" PUBLIC '".bytes)
+                try self.out.add_all(public_id.bytes)
+                try self.out.add('\'')
+                if let system_id = notation.system_id:
+                    try self.out.add_all(" '".bytes)
+                    try self.out.add_all(system_id.bytes)
+                    try self.out.add('\'')
+            elif let system_id = notation.system_id:
+                try self.out.add_all(" SYSTEM '".bytes)
+                try self.out.add_all(system_id.bytes)
+                try self.out.add('\'')
+            try self.out.add_all(">\n".bytes)
+        try self.out.add_all("]>\n".bytes)
+
+    mutating func escaped(text: str) -> !:
+        for byte in text.bytes:
+            if byte == '&':
+                try self.out.add_all("&amp;".bytes)
+            elif byte == '<':
+                try self.out.add_all("&lt;".bytes)
+            elif byte == '>':
+                try self.out.add_all("&gt;".bytes)
+            elif byte == '"':
+                try self.out.add_all("&quot;".bytes)
+            elif byte == '\t':
+                try self.out.add_all("&#9;".bytes)
+            elif byte == '\n':
+                try self.out.add_all("&#10;".bytes)
+            elif byte == '\r':
+                try self.out.add_all("&#13;".bytes)
+            else:
+                try self.out.add(byte)
+
+    mutating func reset():
+        for index in 0..<self.loaded_count:
+            free(self.loaded[index].bytes) in memory.heap
+        self.loaded_count = 0
+        self.out.used = 0
+        self.paths.used = 0
+
+# mark: The run ===============================================================================
+
+## Parse the document of one job and report it.
+func run_job(number: usize, flags: str, path: str, directory: str, canonical: Canonical*, parser: xml.Parser*) -> !:
+    canonical.reset()
+    canonical.directory = directory_of(path)
+    canonical.externals = true
+    parser.options = xml.Options()
+    for flag in flags.bytes:
+        if flag == 'n':
+            parser.options.namespaces = false
+        elif flag == 'u':
+            parser.options.assume_utf8 = true
+        elif flag == 'x':
+            canonical.externals = false
+    let found_source = read_file(path)
+    if found_source == none:
+        print(f"{number} error missing 0:0 cannot read {path}")
+        return
+    let source = found_source else return
+    defer free(source) in memory.heap
+    parser.parse(source, canonical) catch failure:
+        if let found = parser.failure:
+            if failure.code == xml.unsupported_encoding:
+                print(f"{number} encoding {found.encoding}")
+            else:
+                let code = "limit" if failure.code == xml.limit else "malformed"
+                print(f"{number} error {code} {found.position.line}:{found.position.column} {found.message}")
+        else:
+            print(f"{number} error listener 0:0 {failure.message}")
+        return
+    var target = Buffer()
+    defer target.release()
+    try target.add_all(directory.bytes)
+    var digits: u8[24]
+    let name = try format(digits, f"/{number}.xml")
+    try target.add_all(name.bytes)
+    try write_file((str)target.view(), canonical.out.view())
+    print(f"{number} ok")
+
+pub func main(arguments: str[]) -> i32!:
+    if arguments.length < 3:
+        print("usage: xmlconf LIST OUTDIR")
+        return 2
+    let list = read_file(arguments[1]) else error(memory.exhausted, "cannot read the list")
+    var canonical = Canonical()
+    var parser = xml.Parser()
+    defer parser.release()
+    var start: usize = 0
+    var number: usize = 0
+    while start < list.length:
+        var end = start
+        while end < list.length and list[end] != '\n':
+            end += 1
+        let line = (str)list[start..<end]
+        start = end + 1
+        var space: usize = 0
+        while space < line.length and line.bytes[space] != ' ':
+            space += 1
+        if space >= line.length:
+            continue
+        try run_job(number, (str)line.bytes[..<space], (str)line.bytes[space + 1..], arguments[2], &canonical, &parser)
+        discard(fflush(none))
+        number += 1
+    return 0

@@ -1,0 +1,250 @@
+#==============================================================================================
+#
+#   xml/doctype - The DOCTYPE declaration and the DTD's subsets
+#
+#   DESCRIPTION:
+#       `<!DOCTYPE name ExternalID? [internal subset]? >` ([28]). The internal subset is
+#       read first, then the external subset (when the listener supplies it), so the
+#       internal subset's declarations take precedence, the first of each binding.
+#
+#       Parameter entities are where the two subsets differ. Between declarations, a
+#       reference pushes the entity's text, which must hold whole declarations. Inside a
+#       declaration, a reference is an error in the internal subset; in the external
+#       subset (and external parameter entities) it is expanded where white space may
+#       stand, and counts as white space (its text is padded with a space on either
+#       side, §4.4.8). `dtd_space` implements that: a declaration remembers the frame it
+#       began in (`floor`), and the ends of entities pushed above it count as white
+#       space. Conditional sections (`<![INCLUDE[`, `<![IGNORE[`) are read only in the
+#       external subset.
+#
+#       A parameter entity that is not read (undeclared, or external and not supplied)
+#       stops the processing of later ENTITY and ATTLIST declarations, unless the
+#       document is standalone (§5.1); they are still checked for well-formedness.
+#
+#==============================================================================================
+
+## The DOCTYPE declaration, `<!DOCTYPE` at the position; sends the `doctype` event.
+func read_doctype(reader: Reader*) -> !:
+    reader.advance(9)
+    try expect_spaces(reader, "the DOCTYPE's name")
+    let name = try expect_name(reader, "the DOCTYPE's name")
+    reader.has_doctype = true
+    reader.doctype.name = name
+    let spaced = reader.skip_spaces()
+    if reader.looking_at("SYSTEM") or reader.looking_at("PUBLIC"):
+        if not spaced:
+            error(malformed, try reader.complain("expected white space before the external identifier"))
+        let (public_id, system_id) = try read_external_id(reader, 0, false)
+        reader.doctype.public_id = public_id
+        reader.doctype.system_id = system_id
+        reader.external_subset = true
+        discard(reader.skip_spaces())
+    if reader.accept("["):
+        let start = reader.position()
+        try read_declarations(reader, 0, true)
+        reader.doctype.internal_subset = reader.since(start)
+        reader.advance(1)
+        discard(reader.skip_spaces())
+    if not reader.accept(">"):
+        error(malformed, try reader.complain("expected '>' to end the DOCTYPE"))
+    if let system_id = reader.doctype.system_id:
+        let request = EntityRequest(kind = EntityKind.document_type, name = name, public_id = reader.doctype.public_id,
+                                    system_id = system_id)
+        if let bytes = reader.listener.resolve(&request):
+            let text = try read_external_text(reader, bytes, system_id, true)
+            try reader.frames.push(Frame(text = text, external = true, in_external = true, system_id = system_id))
+            try read_declarations(reader, 1, false)
+            reader.frames.used -= 1
+    reader.doctype.notations = reader.notations.view()
+    try reader.listener.event(.doctype(&reader.doctype))
+
+## Markup declarations, parameter-entity references between them and (in the external
+## subset) conditional sections, from frame `base`: up to the `]` that ends the internal
+## subset when `internal`, else to the end of the external subset.
+func read_declarations(reader: Reader*, base: usize, internal: bool) -> !:
+    while true:
+        discard(reader.skip_spaces())
+        if reader.at_end():
+            if reader.top() > base:
+                end_parameter_entity(reader)
+                continue
+            if internal:
+                error(malformed, try reader.complain("the DOCTYPE's internal subset is not closed with ']'"))
+            if reader.includes > 0:
+                error(malformed, try reader.complain("a conditional section is not closed with ']]>'"))
+            return
+        let byte = reader.peek()
+        let in_external = reader.frames.items[reader.top()].in_external
+        if byte == ']' and internal and reader.top() == base:
+            return
+        if byte == '%':
+            discard(try enter_parameter(reader))
+        elif reader.looking_at("<!ELEMENT"):
+            try read_element_declaration(reader)
+        elif reader.looking_at("<!ATTLIST"):
+            try read_attribute_list(reader)
+        elif reader.looking_at("<!ENTITY"):
+            try read_entity_declaration(reader)
+        elif reader.looking_at("<!NOTATION"):
+            try read_notation(reader)
+        elif reader.looking_at("<!--"):
+            discard(try read_comment(reader))
+        elif reader.looking_at("<?"):
+            discard(try read_processing_instruction(reader))
+        elif reader.looking_at("<![") and in_external:
+            try read_conditional_section(reader)
+        elif reader.looking_at("]]>") and in_external and reader.includes > 0:
+            reader.includes -= 1
+            reader.advance(3)
+        elif reader.looking_at("<!["):
+            error(malformed, try reader.complain("conditional sections are allowed only in the external subset"))
+        else:
+            error(malformed, try reader.complain("expected a markup declaration"))
+
+## Whether ENTITY and ATTLIST declarations are processed (not only checked) now.
+func processing(reader: const Reader*) -> bool:
+    return not reader.skipped or reader.standalone
+
+# mark: Parameter entities ====================================================================
+
+## A parameter-entity reference ([69]), `%` at the position: push the entity's text.
+## Answers false when it is not read.
+func enter_parameter(reader: Reader*) -> bool!:
+    reader.advance(1)
+    let name = try expect_name(reader, "a parameter entity's name after '%'")
+    if not reader.accept(";"):
+        error(malformed, try reader.complain(f"the reference '%{name}' must end with ';'"))
+    reader.pe_references = true
+    let declared = reader.parameters.find(name)
+    if declared == none:
+        if reader.standalone:
+            error(malformed, try reader.complain(f"the parameter entity '{name}' is not declared"))
+        reader.skipped = true
+        return false
+    let index = (usize)(declared else 0)
+    let entity = reader.entities.items[index]
+    if entity.expanding:
+        error(malformed, try reader.complain(f"the parameter entity '{name}' refers to itself"))
+    if entity.external:
+        try load_entity(reader, index)
+        if reader.entities.items[index].unavailable:
+            reader.skipped = true
+            return false
+    try push_entity(reader, index)
+    return true
+
+## Skip white space inside a declaration begun in frame `floor`. In the external subset a
+## parameter-entity reference here is expanded, and counts as white space, as does the
+## end of an entity's text pushed since the declaration began. Answers whether there was
+## any white space.
+func dtd_space(reader: Reader*, floor: usize) -> bool!:
+    var spaced = false
+    while true:
+        if reader.skip_spaces():
+            spaced = true
+        if reader.at_end() and reader.top() > floor:
+            end_parameter_entity(reader)
+            spaced = true
+            continue
+        if reader.peek() == '%':
+            let (next, size) = decode_next(reader)
+            if size == 0 or not is_name_start(next):
+                return spaced
+            if not reader.frames.items[reader.top()].in_external:
+                error(malformed, try reader.complain("a parameter-entity reference cannot stand inside a declaration in the internal subset"))
+            discard(try enter_parameter(reader))
+            spaced = true
+            continue
+        return spaced
+
+## The scalar after the one at the position, and its length; (0, 0) at the end.
+func decode_next(reader: const Reader*) -> (u32, usize):
+    let frame = &reader.frames.items[reader.frames.used - 1]
+    if frame.pos + 1 >= frame.text.length:
+        return (0, 0)
+    return decode_utf8(frame.text.bytes, frame.pos + 1)
+
+## White space that must be in a declaration begun in frame `floor`; `what` says what
+## follows it.
+func require_space(reader: Reader*, floor: usize, what: str) -> !:
+    if not try dtd_space(reader, floor):
+        error(malformed, try reader.complain(f"expected white space before {what}"))
+
+## A `>` ending a declaration begun in frame `floor`, after optional white space.
+func end_declaration(reader: Reader*, floor: usize, what: str) -> !:
+    discard(try dtd_space(reader, floor))
+    if not reader.accept(">"):
+        error(malformed, try reader.complain(f"expected '>' to end the {what} declaration"))
+
+# mark: Conditional sections ==================================================================
+
+## A conditional section ([61]), `<![` at the position.
+func read_conditional_section(reader: Reader*) -> !:
+    let floor = reader.top()
+    reader.advance(3)
+    discard(try dtd_space(reader, floor))
+    let keyword = reader.scan_name()
+    discard(try dtd_space(reader, floor))
+    if not reader.accept("["):
+        error(malformed, try reader.complain("expected '[' after the conditional section's keyword"))
+    if keyword == "INCLUDE":
+        reader.includes += 1
+        return
+    if keyword != "IGNORE":
+        error(malformed, try reader.complain("a conditional section must be INCLUDE or IGNORE"))
+    var depth: usize = 1
+    while depth > 0:
+        if reader.at_end():
+            error(malformed, try reader.complain("an IGNORE section is not closed with ']]>'"))
+        if reader.accept("<!["):
+            depth += 1
+        elif reader.accept("]]>"):
+            depth -= 1
+        else:
+            reader.advance(1)
+
+# mark: External identifiers ==================================================================
+
+## ExternalID ([75]), at `SYSTEM` or `PUBLIC`, in a declaration begun in frame `floor`;
+## answers the public and system identifiers. `public_only` allows a public identifier
+## alone (PublicID, [83], in a NOTATION declaration).
+func read_external_id(reader: Reader*, floor: usize, public_only: bool) -> (str?, str?)!:
+    if reader.accept("SYSTEM"):
+        try require_space(reader, floor, "the system identifier")
+        return (none, try read_quoted(reader, "the system identifier"))
+    if not reader.accept("PUBLIC"):
+        error(malformed, try reader.complain("expected SYSTEM or PUBLIC"))
+    try require_space(reader, floor, "the public identifier")
+    let public_id = try read_public_id(reader)
+    let spaced = try dtd_space(reader, floor)
+    let quote = reader.peek()
+    if quote != '"' and quote != '\'':
+        if public_only:
+            return (public_id, none)
+        error(malformed, try reader.complain("expected the system identifier after the public identifier"))
+    if not spaced:
+        error(malformed, try reader.complain("expected white space between the public and system identifiers"))
+    return (public_id, try read_quoted(reader, "the system identifier"))
+
+## A public identifier literal ([12]), its white space normalised (§4.2.2).
+func read_public_id(reader: Reader*) -> str!:
+    let literal = try read_quoted(reader, "the public identifier")
+    var plain = true
+    for (index, byte) in literal.bytes.indexed():
+        if not is_pubid_char(byte):
+            error(malformed, try reader.complain(f"the public identifier holds the character #x{hex(byte)}, which it may not"))
+        if byte == '\n' or byte == '\r' or (byte == ' ' and (index == 0 or index + 1 == literal.length or literal.bytes[index + 1] == ' ')):
+            plain = false
+    if plain:
+        return literal
+    reader.scratch.clear()
+    var pending = false
+    for byte in literal.bytes:
+        if is_space(byte):
+            pending = reader.scratch.used > 0
+            continue
+        if pending:
+            try reader.scratch.add(' ')
+            pending = false
+        try reader.scratch.add(byte)
+    return try reader.arena.store(reader.scratch.items[..<reader.scratch.used])

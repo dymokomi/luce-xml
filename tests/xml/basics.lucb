@@ -1,0 +1,21 @@
+#==============================================================================================
+#
+#   tests/xml/basics - Elements, attributes, text, CDATA, comments and PIs
+#
+#==============================================================================================
+
+test "an element with text":
+    try expect_record("<doc>hello</doc>", "<doc>hello</doc>")
+
+test "an empty-element tag":
+    try expect_record("<doc/>", "<doc/></doc>")
+
+test "attributes keep their order":
+    try expect_record("<doc b='2' a=\"1\"/>", "<doc b=\"2\" a=\"1\"/></doc>")
+
+test "nested elements, comments and processing instructions":
+    try expect_record("<!--c--><?go now?><a><b>x</b><!-- y --><?p?></a><?after?>",
+                      "<!--c--><?go now?><a><b>x</b><!-- y --><?p ?></a><?after ?>")
+
+test "CDATA sections are reported as they are":
+    try expect_record("<a><![CDATA[<x>&amp;]]></a>", "<a><![CDATA[<x>&amp;]]></a>")

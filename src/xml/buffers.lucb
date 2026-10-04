@@ -1,0 +1,202 @@
+#==============================================================================================
+#
+#   xml/buffers - Growable lists, byte strings, a text arena and a name table
+#
+#   DESCRIPTION:
+#       The reader keeps its records in `List`s, heap arrays that double as they fill,
+#       addressed by index so nothing points into them. `Bytes` builds text (and is an
+#       `io.Writer`, so error messages are formatted into one). Text that must outlive
+#       the input it was made from (decoded documents, entity replacement texts,
+#       namespace URIs) is kept in an `Arena`, whose blocks never move. A `Table` maps
+#       names to indices by open addressing, so entity and attribute lookups stay
+#       constant time however large a DTD is.
+#
+#==============================================================================================
+
+# mark: Lists =================================================================================
+
+## A growable heap array of `T`; `used` of `items` are in use.
+struct List[T]:
+    var items: T[]
+    var used: usize = 0
+
+    ## Append `value`.
+    mutating func push(value: T) -> !:
+        if self.used >= self.items.length:
+            let size = 8 if self.items.length == 0 else self.items.length * 2
+            let larger = try alloc T[size] in memory.heap
+            memory.copy(larger, self.items, self.used)
+            if self.items.length > 0:
+                free(self.items) in memory.heap
+            self.items = larger
+        self.items[self.used] = value
+        self.used += 1
+
+    ## The items in use, as a span.
+    func view() -> T[]:
+        return self.items[..<self.used]
+
+    ## Free the items; the list is empty afterwards.
+    mutating func release():
+        if self.items.length > 0:
+            free(self.items) in memory.heap
+        var empty: T[]
+        self.items = empty
+        self.used = 0
+
+# mark: Byte strings ==========================================================================
+
+## Text built a piece at a time.
+struct Bytes: io.Writer:
+    var items: u8[]
+    var used: usize = 0
+
+    ## Room for `more` bytes past those in use.
+    mutating func reserve(more: usize) -> !:
+        let needed = self.used + more
+        if needed <= self.items.length:
+            return
+        var size = 64 if self.items.length == 0 else self.items.length * 2
+        if size < needed:
+            size = needed
+        let larger = try alloc u8[size] in memory.heap
+        memory.copy(larger, self.items, self.used)
+        if self.items.length > 0:
+            free(self.items) in memory.heap
+        self.items = larger
+
+    mutating func add(byte: u8) -> !:
+        if self.used >= self.items.length:
+            try self.reserve(1)
+        self.items[self.used] = byte
+        self.used += 1
+
+    mutating func add_all(data: const u8[]) -> !:
+        try self.reserve(data.length)
+        memory.copy(self.items[self.used..], data, data.length)
+        self.used += data.length
+
+    ## Append `scalar` as UTF-8.
+    mutating func add_scalar(scalar: u32) -> !:
+        try self.reserve(4)
+        self.used += encode_utf8(scalar, self.items[self.used..])
+
+    pub mutating func write(data: const u8[]) -> usize!:
+        try self.add_all(data)
+        return data.length
+
+    ## The bytes so far, as text; valid until the next change.
+    func view() -> str:
+        return (str)self.items[..<self.used]
+
+    mutating func clear():
+        self.used = 0
+
+    mutating func release():
+        if self.items.length > 0:
+            free(self.items) in memory.heap
+        var empty: u8[]
+        self.items = empty
+        self.used = 0
+
+# mark: The text arena ========================================================================
+
+## Bytes for text that outlives what it was made from, in blocks that never move.
+struct Arena:
+    var blocks: List[u8[]] = List[u8[]]()
+    var block_used: usize = 0
+
+    ## A copy of `data` in the arena.
+    mutating func store(data: const u8[]) -> str!:
+        let target = try self.reserve(data.length)
+        memory.copy(target, data, data.length)
+        return (str)target
+
+    ## `length` bytes of fresh arena storage, for the caller to fill.
+    mutating func reserve(length: usize) -> u8[]!:
+        if length == 0:
+            var empty: u8[]
+            return empty
+        var room: usize = 0
+        if self.blocks.used > 0:
+            room = self.blocks.items[self.blocks.used - 1].length - self.block_used
+        if room < length:
+            let size = length if length > 16384 else 16384
+            try self.blocks.push(try alloc u8[size] in memory.heap)
+            self.block_used = 0
+        let block = self.blocks.items[self.blocks.used - 1]
+        let start = self.block_used
+        self.block_used += length
+        return block[start..<start + length]
+
+    ## Free every block; every `str` the arena gave out is invalid afterwards.
+    mutating func release():
+        for block in self.blocks.view():
+            free(block) in memory.heap
+        self.blocks.release()
+        self.block_used = 0
+
+# mark: The name table ========================================================================
+
+## One slot of a `Table`: `value` is 0 when the slot is empty, else the stored value + 1.
+struct Slot:
+    var key: str
+    var value: u32
+
+## A map from names to `u32` values, by open addressing with linear probing.
+struct Table:
+    var slots: Slot[]
+    var count: usize = 0
+
+    ## The value stored for `key`.
+    func find(key: str) -> u32?:
+        if self.count == 0:
+            return none
+        let mask = self.slots.length - 1
+        var index = (usize)(fnv(key) & (u64)mask)
+        while self.slots[index].value != 0:
+            if self.slots[index].key == key:
+                return self.slots[index].value - 1
+            index = (index + 1) & mask
+        return none
+
+    ## Store `value` for `key`, which must not be in the table yet.
+    mutating func insert(key: str, value: u32) -> !:
+        if (self.count + 1) * 2 > self.slots.length:
+            try self.grow()
+        let mask = self.slots.length - 1
+        var index = (usize)(fnv(key) & (u64)mask)
+        while self.slots[index].value != 0:
+            index = (index + 1) & mask
+        self.slots[index] = Slot(key = key, value = value + 1)
+        self.count += 1
+
+    mutating func grow() -> !:
+        let old = self.slots
+        let size = 16 if old.length == 0 else old.length * 2
+        self.slots = try new Slot[size] in memory.heap
+        self.count = 0
+        for slot in old:
+            if slot.value != 0:
+                try self.insert(slot.key, slot.value - 1)
+        if old.length > 0:
+            free(old) in memory.heap
+
+    mutating func clear():
+        for index in 0..<self.slots.length:
+            self.slots[index] = Slot()
+        self.count = 0
+
+    mutating func release():
+        if self.slots.length > 0:
+            free(self.slots) in memory.heap
+        var empty: Slot[]
+        self.slots = empty
+        self.count = 0
+
+## The FNV-1a hash of `key`.
+func fnv(key: str) -> u64:
+    var value: u64 = 0xcbf29ce484222325
+    for byte in key.bytes:
+        value = (value ^ (u64)byte) *% 0x100000001b3
+    return value
