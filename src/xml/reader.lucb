@@ -83,9 +83,12 @@ struct Open:
     var bindings: usize = 0
 
 ## A namespace prefix in scope ("" for the default namespace; a "" `uri` undeclares it).
+## `Reader.prefixes` maps each prefix to its innermost binding; `shadowed` is the one
+## it replaced there, restored when this one goes out of scope.
 struct Binding:
     var prefix: str = ""
     var uri: str = ""
+    var shadowed: u32 = unbound
 
 ## An attribute of the start tag being read, before its value is placed: `value` is a
 ## view of the input, or (when `built`) bytes `start..<end` of `Reader.values`.
@@ -110,11 +113,15 @@ struct Reader:
     var general: Table = Table()
     var parameters: Table = Table()
     var notations: List[Notation] = List[Notation]()
+    var notation_names: Table = Table()
     var attribute_lists: List[AttributeList] = List[AttributeList]()
     var element_types: Table = Table()
+    ## `element attribute` for every attribute declared, to keep the first declaration.
+    var attribute_names: Table = Table()
     var declared: List[AttributeDecl] = List[AttributeDecl]()
     var open: List[Open] = List[Open]()
     var bindings: List[Binding] = List[Binding]()
+    var prefixes: Table = Table()
     var uris: Table = Table()
     var interned: List[str] = List[str]()
     var raw: List[RawAttribute] = List[RawAttribute]()
@@ -160,11 +167,14 @@ struct Reader:
         self.general.release()
         self.parameters.release()
         self.notations.release()
+        self.notation_names.release()
         self.attribute_lists.release()
         self.element_types.release()
+        self.attribute_names.release()
         self.declared.release()
         self.open.release()
         self.bindings.release()
+        self.prefixes.release()
         self.uris.release()
         self.interned.release()
         self.raw.release()

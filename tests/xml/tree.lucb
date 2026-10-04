@@ -1,0 +1,61 @@
+#==============================================================================================
+#
+#   tests/xml/tree - The document tree
+#
+#==============================================================================================
+
+test "a document loads into a tree":
+    var document = Document()
+    defer document.release()
+    try document.load("<?xml version='1.0'?><!--c--><svg xmlns='http://www.w3.org/2000/svg' width='10'><g id='a'>x<![CDATA[y]]><?p d?></g><!--in--></svg>".bytes)
+    let root = document.root() else trap("no root")
+    let svg = document.node(root)
+    assert(svg.kind == NodeKind.element and svg.name.local_name == "svg" and svg.name.namespace == "http://www.w3.org/2000/svg")
+    assert(document.attribute(root, "width") == "10")
+    assert(document.attribute(root, "height") == none)
+    let group = document.child_element(root, "g", "http://www.w3.org/2000/svg") else trap("no g")
+    assert(document.node(group).parent == root)
+    let text = document.node(group).first_child
+    assert(document.node(text).kind == NodeKind.text and document.node(text).value == "x")
+    let cdata = document.node(text).next_sibling
+    assert(document.node(cdata).kind == NodeKind.cdata and document.node(cdata).previous_sibling == text)
+    let instruction = document.node(cdata).next_sibling
+    assert(document.node(instruction).name.qualified == "p" and document.node(instruction).value == "d")
+    let comment = document.node(group).next_sibling
+    assert(document.node(comment).kind == NodeKind.comment and document.node(comment).value == "in")
+    assert(document.node(0).first_child != root)
+    assert(document.declaration.version == "1.0")
+
+test "text content gathers text and CDATA in order":
+    var document = Document()
+    defer document.release()
+    try document.load("<a>one <b>two <c>three</c></b><![CDATA[ four]]><!--no--> five</a>".bytes)
+    var text = Bytes()
+    defer text.release()
+    try document.text_content(document.root() else 0, &text)
+    assert(text.view() == "one two three four five")
+
+test "text split by an entity joins into one node":
+    var document = Document()
+    defer document.release()
+    try document.load("<!DOCTYPE a [<!ENTITY e 'middle<b/>'>]><a>start &e; end</a>".bytes)
+    let root = document.root() else trap("no root")
+    let first = document.node(root).first_child
+    assert(document.node(first).value == "start middle")
+    let element = document.node(first).next_sibling
+    assert(document.node(document.node(element).next_sibling).value == " end")
+    let doctype = document.doctype else trap("no doctype")
+    assert(doctype.name == "a")
+
+test "a load that fails says why, and the next one starts afresh":
+    var document = Document()
+    defer document.release()
+    var failed = false
+    document.load("<a><b></a>".bytes) catch problem:
+        failed = problem.code == malformed
+    assert(failed)
+    let found = document.failure else trap("no failure")
+    assert(found.position.line == 1 and found.position.column == 7)
+    try document.load("<c/>".bytes)
+    assert(document.failure == none)
+    assert(document.node(document.root() else 0).name.qualified == "c")

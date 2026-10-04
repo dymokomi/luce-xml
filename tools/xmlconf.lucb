@@ -6,12 +6,13 @@
 #       The Luce half of the conformance runner (xmlconf.py) and the fuzzer (fuzz.py).
 #       Usage: `xmlconf LIST OUTDIR`. Each line of LIST is `FLAGS PATH`, FLAGS a word of
 #       letters (or `-` for none): `n` parses with namespaces off, `u` takes the document
-#       as UTF-8 already (it was transcoded), `x` leaves external entities unread. For the
-#       Nth line it prints `N ok`, `N encoding LABEL` or `N error CODE LINE:COLUMN
-#       MESSAGE`, and for a well-formed document writes its canonical form (James
-#       Clark's, the form the W3C suite's expected outputs are in; the second form, with
-#       notations, when the DTD declares any) to OUTDIR/N.xml. External entities are read
-#       from files, their system identifiers relative to the entity that declares them.
+#       as UTF-8 already (it was transcoded), `x` leaves external entities unread, `q`
+#       only checks well-formedness (the fuzzer's runs). For the Nth line it prints
+#       `N ok`, `N encoding LABEL` or `N error CODE LINE:COLUMN MESSAGE`, and for a
+#       well-formed document writes its canonical form (James Clark's, the form the W3C
+#       suite's expected outputs are in; the second form, with notations, when the DTD
+#       declares any) to OUTDIR/N.xml. External entities are read from files, their
+#       system identifiers relative to the entity that declares them.
 #
 #==============================================================================================
 
@@ -123,9 +124,13 @@ struct Canonical: xml.Listener:
     var loaded_count: usize = 0
     var directory: str = ""
     var externals: bool = true
+    ## Only check well-formedness: write nothing.
+    var quiet: bool = false
     var order: usize[1024]
 
     pub mutating func event(event: xml.Event) -> !:
+        if self.quiet:
+            return
         match event:
             .doctype(doctype):
                 try self.notations(doctype)
@@ -250,6 +255,11 @@ struct Canonical: xml.Listener:
             else:
                 try self.out.add(byte)
 
+    mutating func release():
+        self.reset()
+        self.out.release()
+        self.paths.release()
+
     mutating func reset():
         for index in 0..<self.loaded_count:
             free(self.loaded[index].bytes) in memory.heap
@@ -264,6 +274,7 @@ func run_job(number: usize, flags: str, path: str, directory: str, canonical: Ca
     canonical.reset()
     canonical.directory = directory_of(path)
     canonical.externals = true
+    canonical.quiet = false
     parser.options = xml.Options()
     for flag in flags.bytes:
         if flag == 'n':
@@ -272,6 +283,8 @@ func run_job(number: usize, flags: str, path: str, directory: str, canonical: Ca
             parser.options.assume_utf8 = true
         elif flag == 'x':
             canonical.externals = false
+        elif flag == 'q':
+            canonical.quiet = true
     let found_source = read_file(path)
     if found_source == none:
         print(f"{number} error missing 0:0 cannot read {path}")
@@ -288,6 +301,9 @@ func run_job(number: usize, flags: str, path: str, directory: str, canonical: Ca
         else:
             print(f"{number} error listener 0:0 {failure.message}")
         return
+    if canonical.quiet:
+        print(f"{number} ok")
+        return
     var target = Buffer()
     defer target.release()
     try target.add_all(directory.bytes)
@@ -302,7 +318,9 @@ pub func main(arguments: str[]) -> i32!:
         print("usage: xmlconf LIST OUTDIR")
         return 2
     let list = read_file(arguments[1]) else error(memory.exhausted, "cannot read the list")
+    defer free(list) in memory.heap
     var canonical = Canonical()
+    defer canonical.release()
     var parser = xml.Parser()
     defer parser.release()
     var start: usize = 0

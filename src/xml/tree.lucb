@@ -1,0 +1,154 @@
+#==============================================================================================
+#
+#   xml/tree - A small document tree built on the listener
+#
+#   DESCRIPTION:
+#       For programs that want a tree rather than events: `Document.load` parses a
+#       document into nodes held in one list and addressed by index (node 0 is the
+#       document itself), linked to their parent, children and siblings, with every
+#       name and text copied into the document's own storage. Elements keep their
+#       attributes (namespaces resolved, defaults included); text, CDATA sections,
+#       comments and processing instructions are nodes too. Adjacent text is one node.
+#       External entities are not read and undeclared names stay unresolved, as a
+#       listener that answers no requests has it.
+#
+#==============================================================================================
+
+## What a tree node is.
+pub enum NodeKind:
+    document
+    element
+    text
+    cdata
+    comment
+    processing_instruction
+
+## A node of a `Document`. Links are node indices, 0 meaning none (node 0, the document,
+## is no node's child or sibling).
+pub struct Node:
+    pub var kind: NodeKind = NodeKind.document
+    ## An element's name; a processing instruction's target is `name.qualified`.
+    pub var name: Name = Name()
+    ## The characters of text and CDATA, a comment's text, a processing instruction's data.
+    pub var value: str = ""
+    pub var parent: u32 = 0
+    pub var first_child: u32 = 0
+    pub var last_child: u32 = 0
+    pub var next_sibling: u32 = 0
+    pub var previous_sibling: u32 = 0
+    var attribute_start: u32 = 0
+    var attribute_count: u32 = 0
+
+## A parsed document as a tree of `Node`s.
+pub struct Document:
+    pub var options: Options = Options()
+    ## Why the last `load` failed, when the document was at fault.
+    pub var failure: ParseError? = none
+    ## The XML declaration (its `source` is left empty).
+    pub var declaration: Declaration = Declaration()
+    ## The document type declaration, if there was one.
+    pub var doctype: Doctype? = none
+    var nodes: List[Node] = List[Node]()
+    var attribute_list: List[Attribute] = List[Attribute]()
+    var notation_list: List[Notation] = List[Notation]()
+    var arena: Arena = Arena()
+    var parser: Parser = Parser()
+
+    ## Parse `source` into this document, replacing what it held. Fails as
+    ## `Parser.parse` does, `failure` saying where and why.
+    pub mutating func load(source: const u8[]) -> !:
+        self.clear()
+        var builder = TreeBuilder(document = &self)
+        defer builder.release()
+        self.parser.options = self.options
+        self.parser.parse(source, &builder) catch problem:
+            self.failure = self.parser.failure
+            error(problem.code, problem.message)
+
+    ## The root element.
+    pub func root() -> u32?:
+        var child = self.nodes.items[0].first_child if self.nodes.used > 0 else 0
+        while child != 0:
+            if self.nodes.items[child].kind == NodeKind.element:
+                return child
+            child = self.nodes.items[child].next_sibling
+        return none
+
+    ## Node `index`.
+    pub func node(index: u32) -> const Node*:
+        return &self.nodes.items[index]
+
+    ## How many nodes the document has, itself included.
+    pub func count() -> usize:
+        return self.nodes.used
+
+    ## The attributes of element `index`, in document order then defaults.
+    pub func attributes(index: u32) -> const Attribute[]:
+        let node = &self.nodes.items[index]
+        let start = (usize)node.attribute_start
+        return self.attribute_list.items[start..<start + (usize)node.attribute_count]
+
+    ## The value of element `index`'s attribute `local_name` in `namespace` ("" for an
+    ## attribute without a prefix).
+    pub func attribute(index: u32, local_name: str, namespace: str = "") -> str?:
+        for attribute in self.attributes(index):
+            if attribute.name.local_name == local_name and attribute.name.namespace == namespace:
+                return attribute.value
+        return none
+
+    ## The first child element of `index` named `local_name` in `namespace`.
+    pub func child_element(index: u32, local_name: str, namespace: str = "") -> u32?:
+        var child = self.nodes.items[index].first_child
+        while child != 0:
+            let node = &self.nodes.items[child]
+            if node.kind == NodeKind.element and node.name.local_name == local_name and node.name.namespace == namespace:
+                return child
+            child = node.next_sibling
+        return none
+
+    ## Write the text of `index` and everything in it (text and CDATA, in document
+    ## order) to `sink`.
+    pub func text_content(index: u32, sink: io.Writer) -> !:
+        let node = &self.nodes.items[index]
+        if node.kind == NodeKind.text or node.kind == NodeKind.cdata:
+            discard(try sink.write(node.value.bytes))
+            return
+        if node.kind != NodeKind.element and node.kind != NodeKind.document:
+            return
+        var current = node.first_child
+        while current != 0:
+            let child = &self.nodes.items[current]
+            if child.kind == NodeKind.text or child.kind == NodeKind.cdata:
+                discard(try sink.write(child.value.bytes))
+            if child.first_child != 0:
+                current = child.first_child
+                continue
+            current = following(&self, current, index)
+
+    ## Free everything the document holds.
+    pub mutating func release():
+        self.clear()
+        self.nodes.release()
+        self.attribute_list.release()
+        self.notation_list.release()
+        self.parser.release()
+
+    mutating func clear():
+        self.nodes.used = 0
+        self.attribute_list.used = 0
+        self.notation_list.used = 0
+        self.arena.release()
+        self.failure = none
+        self.declaration = Declaration()
+        self.doctype = none
+
+## The node after `index` in document order that is not inside it, staying within `top`;
+## 0 past the end.
+func following(document: const Document*, index: u32, top: u32) -> u32:
+    var current = index
+    while current != top:
+        let node = &document.nodes.items[current]
+        if node.next_sibling != 0:
+            return node.next_sibling
+        current = node.parent
+    return 0

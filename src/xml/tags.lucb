@@ -149,12 +149,13 @@ func read_value_reference(reader: Reader*, attribute: str) -> !:
 ## add the defaults it declares for attributes the tag does not give.
 func apply_declarations(reader: Reader*, qualified: str) -> !:
     let list = reader.element_types.find(qualified) else return
+    let written = reader.raw.used
     var link = reader.attribute_lists.items[list].first
     while link != 0:
         let declared = reader.declared.items[link - 1]
         link = declared.next
         var given = false
-        for index in 0..<reader.raw.used:
+        for index in 0..<written:
             if reader.raw.items[index].name == declared.name:
                 given = true
                 if not declared.cdata:
@@ -221,6 +222,6 @@ func finish_start_tag(reader: Reader*, qualified: str, empty: bool) -> !:
     try reader.listener.event(.element_start(&element))
     if empty:
         try reader.listener.event(.element_end(&name))
-        reader.bindings.used = bindings
+        try unbind(reader, bindings)
         return
     try reader.open.push(Open(name = name, frame = reader.top(), bindings = bindings))

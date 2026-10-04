@@ -173,22 +173,22 @@ func read_default_value(reader: Reader*, name: str, cdata: bool) -> str!:
 
 ## Add `declared` to `element`'s attributes, unless the element has it already.
 func declare_attribute(reader: Reader*, element: str, declared: AttributeDecl) -> !:
-    let index = (u32)reader.declared.used
-    let found = reader.element_types.find(element)
-    if found == none:
-        try reader.element_types.insert(element, (u32)reader.attribute_lists.used)
-        try reader.attribute_lists.push(AttributeList(first = index + 1, last = index + 1))
-        try reader.declared.push(declared)
+    let key = try reader.arena.reserve(element.length + 1 + declared.name.length)
+    memory.copy(key, element.bytes, element.length)
+    key[element.length] = ' '
+    memory.copy(key[element.length + 1..], declared.name.bytes, declared.name.length)
+    if reader.attribute_names.find((str)key) != none:
         return
-    let list = &reader.attribute_lists.items[(usize)(found else 0)]
-    var link = list.first
-    while link != 0:
-        if reader.declared.items[link - 1].name == declared.name:
-            return
-        link = reader.declared.items[link - 1].next
-    reader.declared.items[list.last - 1].next = index + 1
-    list.last = index + 1
+    let index = (u32)reader.declared.used
+    try reader.attribute_names.insert((str)key, index)
     try reader.declared.push(declared)
+    if let found = reader.element_types.find(element):
+        let list = &reader.attribute_lists.items[(usize)found]
+        reader.declared.items[list.last - 1].next = index + 1
+        list.last = index + 1
+        return
+    try reader.element_types.insert(element, (u32)reader.attribute_lists.used)
+    try reader.attribute_lists.push(AttributeList(first = index + 1, last = index + 1))
 
 # mark: Element types =========================================================================
 
@@ -277,7 +277,7 @@ func read_notation(reader: Reader*) -> !:
     try require_space(reader, floor, "the notation's identifier")
     let (public_id, system_id) = try read_external_id(reader, floor, true)
     try end_declaration(reader, floor, "notation")
-    for known in reader.notations.view():
-        if known.name == name:
-            return
+    if reader.notation_names.find(name) != none:
+        return
+    try reader.notation_names.insert(name, (u32)reader.notations.used)
     try reader.notations.push(Notation(name = name, public_id = public_id, system_id = system_id))

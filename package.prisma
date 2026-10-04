@@ -6,5 +6,5 @@ def package "luce-xml" {
     str language = "luce-base"
     str description = "A conforming, non-validating XML 1.0 + Namespaces parser for Luce/Base: a streaming listener interface and a small document tree."
     str readme = "README.md"
-    str[] public = ["xml", "dom"]
+    str[] public = ["xml"]
 }

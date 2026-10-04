@@ -29,6 +29,8 @@
 #       entities.lucb      entity references and loading external entities
 #       doctype.lucb       the DOCTYPE declaration and the DTD's subsets
 #       declarations.lucb  ENTITY, ATTLIST, ELEMENT and NOTATION declarations
+#       tree.lucb          Document: a small tree of nodes built on the listener
+#       tree_build.lucb    the listener that builds a Document
 #
 #==============================================================================================
 

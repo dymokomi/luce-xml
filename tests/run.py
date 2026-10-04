@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIRST = Path(os.environ.get("LUCE_BASE") or ROOT.parent / "luce-base/build/luce-base").resolve()
 EXTRA = [Path(p).resolve() for p in os.environ.get("LUCE_BASE_EXTRA", "").split(":") if p]
-MODULES = [m for m in ["xml", "dom"] if (ROOT / "src" / m).exists()]
+MODULES = ["xml"]
 SOURCES = sorted(str(p.relative_to(ROOT)) for p in ROOT.glob("*/**/*.lucb") if p.parts[len(ROOT.parts)] in ("src", "tests", "tools"))
 
 

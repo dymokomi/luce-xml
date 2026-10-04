@@ -1,0 +1,139 @@
+#==============================================================================================
+#
+#   xml/tree_build - Building a Document from the parser's events
+#
+#   DESCRIPTION:
+#       `TreeBuilder` is the listener `Document.load` parses with. Each event becomes a
+#       node appended under the current element, its names and text copied into the
+#       document's arena (the event's own views do not outlive the event). Text that
+#       follows text, as it can where an entity holding markup ends, joins the node
+#       before it.
+#
+#==============================================================================================
+
+## The listener that builds a `Document`.
+struct TreeBuilder: Listener:
+    var document: Document*
+    var current: u32 = 0
+    ## The namespace URIs copied so far, so each is kept once.
+    var uris: List[str] = List[str]()
+    var uri_table: Table = Table()
+
+    pub mutating func event(event: Event) -> !:
+        match event:
+            .document_start(declaration):
+                try self.start(declaration)
+            .doctype(doctype):
+                try self.keep_doctype(doctype)
+            .element_start(element):
+                try self.element(element)
+            .element_end(name):
+                discard(name)
+                self.current = self.document.nodes.items[self.current].parent
+            .text(text):
+                try self.characters(NodeKind.text, text)
+            .cdata(text):
+                try self.characters(NodeKind.cdata, text)
+            .processing_instruction(target, data):
+                let kept = try self.copy(target)
+                try self.append(Node(kind = NodeKind.processing_instruction, name = Name(qualified = kept, local_name = kept),
+                                     value = try self.copy(data)))
+            .comment(text):
+                try self.append(Node(kind = NodeKind.comment, value = try self.copy(text)))
+            _:
+                return
+
+    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
+        discard(request)
+        return none
+
+    mutating func start(declaration: const Declaration*) -> !:
+        try self.document.nodes.push(Node())
+        self.document.declaration = Declaration(version = try self.copy(declaration.version),
+                                                encoding = try self.copy(declaration.encoding),
+                                                standalone = declaration.standalone)
+
+    mutating func keep_doctype(doctype: const Doctype*) -> !:
+        for notation in doctype.notations:
+            var public_id: str? = none
+            if let given = notation.public_id:
+                public_id = try self.copy(given)
+            var system_id: str? = none
+            if let given = notation.system_id:
+                system_id = try self.copy(given)
+            try self.document.notation_list.push(Notation(name = try self.copy(notation.name), public_id = public_id,
+                                                          system_id = system_id))
+        var public_id: str? = none
+        if let given = doctype.public_id:
+            public_id = try self.copy(given)
+        var system_id: str? = none
+        if let given = doctype.system_id:
+            system_id = try self.copy(given)
+        self.document.doctype = Doctype(name = try self.copy(doctype.name), public_id = public_id, system_id = system_id,
+                                        internal_subset = try self.copy(doctype.internal_subset),
+                                        notations = self.document.notation_list.view())
+
+    mutating func element(element: const Element*) -> !:
+        let start = (u32)self.document.attribute_list.used
+        for attribute in element.attributes:
+            try self.document.attribute_list.push(Attribute(name = try self.copy_name(&attribute.name),
+                                                            value = try self.copy(attribute.value),
+                                                            specified = attribute.specified))
+        let index = try self.append(Node(kind = NodeKind.element, name = try self.copy_name(&element.name),
+                                         attribute_start = start, attribute_count = (u32)element.attributes.length))
+        self.current = index
+
+    ## Text or CDATA; text after text joins it.
+    mutating func characters(kind: NodeKind, text: str) -> !:
+        let last = self.document.nodes.items[self.current].last_child
+        if kind == NodeKind.text and last != 0 and self.document.nodes.items[last].kind == NodeKind.text:
+            let before = self.document.nodes.items[last].value
+            let joined = try self.document.arena.reserve(before.length + text.length)
+            memory.copy(joined, before.bytes, before.length)
+            memory.copy(joined[before.length..], text.bytes, text.length)
+            self.document.nodes.items[last].value = (str)joined
+            return
+        try self.append(Node(kind = kind, value = try self.copy(text)))
+
+    ## Append `node` as the last child of the current node; answer its index.
+    mutating func append(node: Node) -> u32!:
+        var child = node
+        child.parent = self.current
+        let index = (u32)self.document.nodes.used
+        let nodes = &self.document.nodes
+        let last = nodes.items[self.current].last_child
+        child.previous_sibling = last
+        try nodes.push(child)
+        if last != 0:
+            nodes.items[last].next_sibling = index
+        else:
+            nodes.items[self.current].first_child = index
+        nodes.items[self.current].last_child = index
+        return index
+
+    mutating func copy(text: str) -> str!:
+        return try self.document.arena.store(text.bytes)
+
+    ## `name` with its parts in the document's arena (the parts are views of the copy;
+    ## the namespace is copied apart).
+    mutating func copy_name(name: const Name*) -> Name!:
+        let qualified = try self.copy(name.qualified)
+        let split = name.qualified.length - name.local_name.length
+        return Name(qualified = qualified, prefix = (str)qualified.bytes[..<name.prefix.length],
+                    local_name = (str)qualified.bytes[split..], namespace = try self.copy_uri(name.namespace))
+
+    ## Free the builder's own lists.
+    mutating func release():
+        self.uris.release()
+        self.uri_table.release()
+
+    ## `uri` in the document's arena, one copy of each.
+    mutating func copy_uri(uri: str) -> str!:
+        if uri.length == 0:
+            return ""
+        if let index = self.uri_table.find(uri):
+            return self.uris.items[index]
+        let kept = try self.copy(uri)
+        try self.uri_table.insert(kept, (u32)self.uris.used)
+        try self.uris.push(kept)
+        return kept

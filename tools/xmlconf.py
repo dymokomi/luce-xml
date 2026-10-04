@@ -17,7 +17,12 @@ the suite's files (the parser asks the tool, which reads them). A document in an
 encoding luce-xml does not decode is transcoded here with Python's codecs and parsed
 again as UTF-8, as a browser would hand it over.
 
-  python3 tools/xmlconf.py [--suite DIR] [--list-failing] [--only xmltest]
+--no-external leaves every external entity unread, as a browser does; then only the
+not-wf documents whose error is in the document itself (ENTITIES="none") must be
+rejected, and canonical outputs are not compared (the suite's assume a reading
+processor).
+
+  python3 tools/xmlconf.py [--suite DIR] [--list-failing] [--only xmltest] [--no-external]
 
 LUCE_BASE names the compiler (default: luce-base on PATH).
 """
@@ -128,11 +133,16 @@ def main():
     parser.add_argument("--list-failing", action="store_true")
     parser.add_argument("--only", default=None)
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--no-external", action="store_true")
     options = parser.parse_args()
     if not options.no_build:
         build()
     cases = [case for case in tests(options.suite) if options.only in (None, case[0])]
-    jobs = [("n" if case[1].get("NAMESPACE") == "no" else "", str(case[2])) for case in cases]
+    if options.no_external:
+        cases = [(c, a, d, None) for c, a, d, _ in cases
+                 if a["TYPE"] != "not-wf" or a.get("ENTITIES", "none") == "none"]
+    unread = "x" if options.no_external else ""
+    jobs = [(("n" if case[1].get("NAMESPACE") == "no" else "") + unread, str(case[2])) for case in cases]
     results = run_batch(jobs)
     # Documents in encodings luce-xml leaves to its caller: transcode and parse again.
     retry = [i for i, result in enumerate(results) if result and result[0] == "encoding"]

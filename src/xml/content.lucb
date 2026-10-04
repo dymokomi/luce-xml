@@ -98,7 +98,7 @@ func read_end_tag(reader: Reader*) -> !:
         reader.rewind(start)
         error(malformed, try reader.complain(f"the end tag </{found}> is in a different entity than its start tag"))
     try reader.listener.event(.element_end(&open.name))
-    reader.bindings.used = open.bindings
+    try unbind(reader, open.bindings)
     reader.open.used -= 1
 
 ## The top frame, an entity's text, has ended: it must have closed what it opened.

@@ -24,7 +24,7 @@ func resolve_namespaces(reader: Reader*, qualified: str) -> Name!:
         if written == "xmlns":
             if attribute.value == xml_namespace or attribute.value == xmlns_namespace:
                 error(malformed, try reader.complain(f"the default namespace cannot be {attribute.value}"))
-            try reader.bindings.push(Binding(uri = try intern(reader, attribute.value)))
+            try bind(reader, "", try intern(reader, attribute.value))
             reader.attributes.items[index].name = Name(qualified = written, local_name = "xmlns", namespace = xmlns_namespace)
             continue
         if written.length < 6 or not ((str)written.bytes[..<6] == "xmlns:"):
@@ -43,7 +43,7 @@ func resolve_namespaces(reader: Reader*, qualified: str) -> Name!:
             error(malformed, try reader.complain(f"no prefix can be bound to {xmlns_namespace}"))
         if attribute.value.length == 0:
             error(malformed, try reader.complain(f"the prefix '{prefix}' cannot be undeclared (XML 1.0 namespaces)"))
-        try reader.bindings.push(Binding(prefix = prefix, uri = try intern(reader, attribute.value)))
+        try bind(reader, prefix, try intern(reader, attribute.value))
         reader.attributes.items[index].name = Name(qualified = written, prefix = "xmlns", local_name = prefix, namespace = xmlns_namespace)
     let element = try qualify(reader, qualified, "element")
     if element.prefix == "xmlns":
@@ -84,14 +84,28 @@ func qualify(reader: Reader*, written: str, what: str) -> Name!:
 func lookup(reader: Reader*, prefix: str, written: str) -> str!:
     if prefix == "xml":
         return xml_namespace
-    var index = reader.bindings.used
-    while index > 0:
-        index -= 1
-        if reader.bindings.items[index].prefix == prefix:
+    if let index = reader.prefixes.find(prefix):
+        if index != unbound:
             return reader.bindings.items[index].uri
     if prefix.length == 0:
         return ""
     error(malformed, try reader.complain(f"the prefix '{prefix}' of '{written}' is not declared"))
+
+## The value `Reader.prefixes` holds for a prefix with no binding in scope.
+let unbound: u32 = 0xFFFFFFFE
+
+## Bind `prefix` to `uri` for the element being started.
+func bind(reader: Reader*, prefix: str, uri: str) -> !:
+    let shadowed = reader.prefixes.find(prefix) else unbound
+    try reader.prefixes.set(prefix, (u32)reader.bindings.used)
+    try reader.bindings.push(Binding(prefix = prefix, uri = uri, shadowed = shadowed))
+
+## Drop the bindings made since there were `mark` of them, restoring what they shadowed.
+func unbind(reader: Reader*, mark: usize) -> !:
+    while reader.bindings.used > mark:
+        reader.bindings.used -= 1
+        let binding = reader.bindings.items[reader.bindings.used]
+        try reader.prefixes.set(binding.prefix, binding.shadowed)
 
 ## No two attributes may have the same namespace and local name (NSC: Attributes Unique).
 func check_expanded_unique(reader: Reader*, qualified: str) -> !:

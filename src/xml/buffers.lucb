@@ -171,6 +171,18 @@ struct Table:
         self.slots[index] = Slot(key = key, value = value + 1)
         self.count += 1
 
+    ## Store `value` for `key`, replacing the value it had.
+    mutating func set(key: str, value: u32) -> !:
+        if self.count > 0:
+            let mask = self.slots.length - 1
+            var index = (usize)(fnv(key) & (u64)mask)
+            while self.slots[index].value != 0:
+                if self.slots[index].key == key:
+                    self.slots[index].value = value + 1
+                    return
+                index = (index + 1) & mask
+        try self.insert(key, value)
+
     mutating func grow() -> !:
         let old = self.slots
         let size = 16 if old.length == 0 else old.length * 2
