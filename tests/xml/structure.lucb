@@ -78,3 +78,41 @@ struct Refusing: Listener:
         return none
 
 let refused: ErrorCode = ErrorCode.package(90)
+
+test "an element's attribute by its written name":
+    var parser = Parser()
+    defer parser.release()
+    var finder = Finder()
+    try parser.parse("<a x='1' p:y='2' xmlns:p='urn:p'/>".bytes, &finder)
+    assert(finder.found == 2)
+
+test "describe writes the position and the message":
+    var parser = Parser()
+    defer parser.release()
+    var checker = Checker()
+    parser.parse("<a>\n</b>".bytes, &checker) catch failure:
+        discard(failure)
+    let found = parser.failure else trap("the parse should fail")
+    var text = Bytes()
+    defer text.release()
+    try describe(&found, &text)
+    assert(text.view() == "2:1: the end tag </b> does not match the start tag <a>")
+
+## Looks attributes up by their written names.
+struct Finder: Listener:
+    var found: usize = 0
+
+    pub mutating func event(event: Event) -> !:
+        match event:
+            .element_start(element):
+                if element.attribute("x") == "1":
+                    self.found += 1
+                if element.attribute("p:y") == "2":
+                    self.found += 1
+                assert(element.attribute("y") == none)
+            _:
+                return
+
+    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
+        discard(request)
+        return none

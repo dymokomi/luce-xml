@@ -206,10 +206,12 @@ pub interface Listener:
 pub struct Checker: Listener:
     var events: usize = 0
 
+    ## Count the event, and nothing else.
     pub mutating func event(event: Event) -> !:
         discard(event)
         self.events += 1
 
+    ## Read no entity.
     pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
         discard(request)
         return none

@@ -15,6 +15,8 @@
 #
 #==============================================================================================
 
+# mark: Resolving a start tag =================================================================
+
 ## Resolve the namespaces of the start tag whose attributes are in `Reader.attributes`;
 ## answer the element's name. The tag's bindings are pushed onto `Reader.bindings`.
 func resolve_namespaces(reader: Reader*, qualified: str) -> Name!:
@@ -91,6 +93,8 @@ func lookup(reader: Reader*, prefix: str, written: str) -> str!:
         return ""
     error(malformed, try reader.complain(f"the prefix '{prefix}' of '{written}' is not declared"))
 
+# mark: Bindings ==============================================================================
+
 ## The value `Reader.prefixes` holds for a prefix with no binding in scope.
 let unbound: u32 = 0xFFFFFFFE
 
@@ -106,6 +110,8 @@ func unbind(reader: Reader*, mark: usize) -> !:
         reader.bindings.used -= 1
         let binding = reader.bindings.items[reader.bindings.used]
         try reader.prefixes.set(binding.prefix, binding.shadowed)
+
+# mark: Attribute names =======================================================================
 
 ## No two attributes may have the same namespace and local name (NSC: Attributes Unique).
 func check_expanded_unique(reader: Reader*, qualified: str) -> !:

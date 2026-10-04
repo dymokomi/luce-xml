@@ -104,3 +104,15 @@ struct SubsetKeeper: Listener:
     pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
         discard(request)
         return none
+
+test "a standalone document must declare its entities in the internal subset":
+    try expect_failure("<?xml version='1.0' standalone='yes'?><!DOCTYPE d SYSTEM 'd.dtd'><d>&e;</d>", "the entity 'e' is not declared")
+    var recorder = Recorder()
+    defer recorder.release()
+    try recorder.supplied.push(Supplied(system_id = "d.dtd", text = "<!ENTITY e 'from outside'>"))
+    let found = try record("<?xml version='1.0' standalone='yes'?><!DOCTYPE d SYSTEM 'd.dtd'><d>&e;</d>", &recorder)
+    assert(has_text(found, "declared outside its internal subset"))
+    var relaxed = Recorder()
+    defer relaxed.release()
+    try relaxed.supplied.push(Supplied(system_id = "d.dtd", text = "<!ENTITY e 'from outside'>"))
+    assert(try record("<!DOCTYPE d SYSTEM 'd.dtd'><d>&e;</d>", &relaxed) == "<!DOCTYPE d \"d.dtd\"><d>from outside</d>")

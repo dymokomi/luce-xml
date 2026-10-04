@@ -9,6 +9,8 @@
 #
 #==============================================================================================
 
+# mark: Comments and processing instructions ==================================================
+
 ## A comment, `<!--` at the position; answers its text.
 func read_comment(reader: Reader*) -> str!:
     reader.advance(4)
@@ -35,7 +37,7 @@ func read_processing_instruction(reader: Reader*) -> (str, str)!:
         if target == "xml":
             error(malformed, try reader.complain("a text declaration must be at the very start of its entity"))
         error(malformed, try reader.complain(f"the processing instruction target '{target}' is reserved"))
-    if reader.options.namespaces and strings_contain(target, ':'):
+    if reader.options.namespaces and has_byte(target, ':'):
         error(malformed, try reader.complain(f"the processing instruction target '{target}' contains a colon"))
     if reader.accept("?>"):
         return (target, "")
@@ -49,6 +51,8 @@ func read_processing_instruction(reader: Reader*) -> (str, str)!:
             return (target, data)
         reader.advance(1)
     error(malformed, try reader.complain(f"the processing instruction '{target}' is not closed with '?>'"))
+
+# mark: Names and literals ====================================================================
 
 ## A quoted literal at the position, without its quotes; `what` names it in errors.
 func read_quoted(reader: Reader*, what: str) -> str!:
@@ -78,7 +82,7 @@ func expect_spaces(reader: Reader*, what: str) -> !:
         error(malformed, try reader.complain(f"expected white space before {what}"))
 
 ## Whether `text` holds `byte`.
-func strings_contain(text: str, byte: u8) -> bool:
+func has_byte(text: str, byte: u8) -> bool:
     for each in text.bytes:
         if each == byte:
             return true

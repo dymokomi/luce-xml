@@ -24,7 +24,7 @@ func read_entity_declaration(reader: Reader*) -> !:
         try require_space(reader, floor, "the parameter entity's name")
         parameter = true
     let name = try expect_name(reader, "the entity's name")
-    if reader.options.namespaces and strings_contain(name, ':'):
+    if reader.options.namespaces and has_byte(name, ':'):
         error(malformed, try reader.complain(f"the entity name '{name}' contains a colon"))
     try require_space(reader, floor, "the entity's value")
     var entity = Entity(name = name, parameter = parameter, outside = reader.top() > 0)
@@ -272,7 +272,7 @@ func read_notation(reader: Reader*) -> !:
     reader.advance(10)
     try require_space(reader, floor, "the notation's name")
     let name = try expect_name(reader, "the notation's name")
-    if reader.options.namespaces and strings_contain(name, ':'):
+    if reader.options.namespaces and has_byte(name, ':'):
         error(malformed, try reader.complain(f"the notation name '{name}' contains a colon"))
     try require_space(reader, floor, "the notation's identifier")
     let (public_id, system_id) = try read_external_id(reader, floor, true)
