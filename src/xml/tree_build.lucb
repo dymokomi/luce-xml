@@ -19,7 +19,7 @@ struct TreeBuilder: Listener:
     var uris: List[str] = List[str]()
     var uri_table: Table = Table()
 
-    pub mutating func event(event: Event) -> !:
+    pub func event(event: Event) -> !:
         match event:
             .document_start(declaration):
                 try self.start(declaration)
@@ -28,7 +28,7 @@ struct TreeBuilder: Listener:
             .element_start(element):
                 try self.element(element)
             .element_end(name):
-                discard(name)
+                _ = name
                 self.current = self.document.nodes.items[self.current].parent
             .text(text):
                 try self.characters(NodeKind.text, text)
@@ -43,17 +43,17 @@ struct TreeBuilder: Listener:
             _:
                 return
 
-    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
-        discard(request)
+    pub func resolve(request: const EntityRequest*) -> const u8[]?:
+        _ = request
         return none
 
-    mutating func start(declaration: const Declaration*) -> !:
+    func start(declaration: const Declaration*) -> !:
         try self.document.nodes.push(Node())
         self.document.declaration = Declaration(version = try self.copy(declaration.version),
                                                 encoding = try self.copy(declaration.encoding),
                                                 standalone = declaration.standalone)
 
-    mutating func keep_doctype(doctype: const Doctype*) -> !:
+    func keep_doctype(doctype: const Doctype*) -> !:
         for notation in doctype.notations:
             var public_id: str? = none
             if let given = notation.public_id:
@@ -73,7 +73,7 @@ struct TreeBuilder: Listener:
                                         internal_subset = try self.copy(doctype.internal_subset),
                                         notations = self.document.notation_list.view())
 
-    mutating func element(element: const Element*) -> !:
+    func element(element: const Element*) -> !:
         let start = (u32)self.document.attribute_list.used
         for attribute in element.attributes:
             try self.document.attribute_list.push(Attribute(name = try self.copy_name(&attribute.name),
@@ -84,7 +84,7 @@ struct TreeBuilder: Listener:
         self.current = index
 
     ## Text or CDATA; text after text joins it.
-    mutating func characters(kind: NodeKind, text: str) -> !:
+    func characters(kind: NodeKind, text: str) -> !:
         let last = self.document.nodes.items[self.current].last_child
         if kind == NodeKind.text and last != 0 and self.document.nodes.items[last].kind == NodeKind.text:
             let before = self.document.nodes.items[last].value
@@ -96,7 +96,7 @@ struct TreeBuilder: Listener:
         try self.append(Node(kind = kind, value = try self.copy(text)))
 
     ## Append `node` as the last child of the current node; answer its index.
-    mutating func append(node: Node) -> u32!:
+    func append(node: Node) -> u32!:
         var child = node
         child.parent = self.current
         let index = (u32)self.document.nodes.used
@@ -111,24 +111,24 @@ struct TreeBuilder: Listener:
         nodes.items[self.current].last_child = index
         return index
 
-    mutating func copy(text: str) -> str!:
+    func copy(text: str) -> str!:
         return try self.document.arena.store(text.bytes)
 
     ## `name` with its parts in the document's arena (the parts are views of the copy;
     ## the namespace is copied apart).
-    mutating func copy_name(name: const Name*) -> Name!:
+    func copy_name(name: const Name*) -> Name!:
         let qualified = try self.copy(name.qualified)
         let split = name.qualified.length - name.local_name.length
         return Name(qualified = qualified, prefix = (str)qualified.bytes[..<name.prefix.length],
                     local_name = (str)qualified.bytes[split..], namespace = try self.copy_uri(name.namespace))
 
     ## Free the builder's own lists.
-    mutating func release():
+    func release():
         self.uris.release()
         self.uri_table.release()
 
     ## `uri` in the document's arena, one copy of each.
-    mutating func copy_uri(uri: str) -> str!:
+    func copy_uri(uri: str) -> str!:
         if uri.length == 0:
             return ""
         if let index = self.uri_table.find(uri):

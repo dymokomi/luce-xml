@@ -24,18 +24,18 @@ struct Recorder: Listener:
     var named: bool = false
     var requests: Bytes = Bytes()
 
-    pub mutating func event(event: Event) -> !:
+    pub func event(event: Event) -> !:
         match event:
             .document_start(declaration):
-                discard(declaration)
+                _ = declaration
             .doctype(doctype):
-                discard(try self.out.write(f"<!DOCTYPE {doctype.name}"))
+                _ = try self.out.write(f"<!DOCTYPE {doctype.name}")
                 if let public_id = doctype.public_id:
-                    discard(try self.out.write(f" PUBLIC \"{public_id}\""))
+                    _ = try self.out.write(f" PUBLIC \"{public_id}\"")
                 if let system_id = doctype.system_id:
-                    discard(try self.out.write(f" \"{system_id}\""))
+                    _ = try self.out.write(f" \"{system_id}\"")
                 for notation in doctype.notations:
-                    discard(try self.out.write(f" N:{notation.name}"))
+                    _ = try self.out.write(f" N:{notation.name}")
                 try self.out.add_all(">".bytes)
             .element_start(element):
                 try self.out.add('<')
@@ -58,19 +58,19 @@ struct Recorder: Listener:
             .text(text):
                 try self.escaped(text)
             .cdata(text):
-                discard(try self.out.write(f"<![CDATA[{text}]]>"))
+                _ = try self.out.write(f"<![CDATA[{text}]]>")
             .processing_instruction(target, data):
-                discard(try self.out.write(f"<?{target} {data}?>"))
+                _ = try self.out.write(f"<?{target} {data}?>")
             .comment(text):
-                discard(try self.out.write(f"<!--{text}-->"))
+                _ = try self.out.write(f"<!--{text}-->")
             .parse_error(failure):
-                discard(failure)
+                _ = failure
             .document_end:
                 return
 
-    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
+    pub func resolve(request: const EntityRequest*) -> const u8[]?:
         let noted = self.requests.write(f"[{request.name}:{request.system_id}]") else 0
-        discard(noted)
+        _ = noted
         if request.kind == EntityKind.named:
             if self.named and request.name == "nbsp":
                 return "\u{A0}".bytes
@@ -80,13 +80,13 @@ struct Recorder: Listener:
                 return each.text.bytes
         return none
 
-    mutating func name(name: const Name*) -> !:
+    func name(name: const Name*) -> !:
         if self.spaces and name.namespace.length > 0:
-            discard(try self.out.write(f"{{{name.namespace}}}{name.local_name}"))
+            _ = try self.out.write(f"{{{name.namespace}}}{name.local_name}")
             return
         try self.out.add_all(name.qualified.bytes)
 
-    mutating func escaped(text: str) -> !:
+    func escaped(text: str) -> !:
         for byte in text.bytes:
             if byte == '&':
                 try self.out.add_all("&amp;".bytes)
@@ -103,7 +103,7 @@ struct Recorder: Listener:
             else:
                 try self.out.add(byte)
 
-    mutating func release():
+    func release():
         self.out.release()
         self.supplied.release()
         self.requests.release()
@@ -115,9 +115,9 @@ func record(source: str, recorder: Recorder*, options: Options = Options()) -> s
     parser.parse(source.bytes, recorder) catch failure:
         recorder.out.clear()
         if let found = parser.failure:
-            discard(try recorder.out.write(f"error {found.position.line}:{found.position.column}: {found.message}"))
+            _ = try recorder.out.write(f"error {found.position.line}:{found.position.column}: {found.message}")
         else:
-            discard(try recorder.out.write(f"failed {failure.message}"))
+            _ = try recorder.out.write(f"failed {failure.message}")
     return recorder.out.view()
 
 ## Expect parsing `source` to record `expected`.

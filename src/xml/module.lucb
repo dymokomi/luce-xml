@@ -193,13 +193,13 @@ pub struct EntityRequest:
 ## Receives a document's events, and supplies the entities the parser never fetches.
 pub interface Listener:
     ## Handle the next event. A failure stops the parse and `parse` fails with it.
-    mutating func event(event: Event) -> !
+    func event(event: Event) -> !
 
     ## The bytes of the entity `request` names (an external entity in any encoding the
     ## parser decodes, a text declaration first if it has one; for `named`, UTF-8
     ## characters), or `none` to skip it. The bytes must stay valid until `parse`
     ## returns.
-    mutating func resolve(request: const EntityRequest*) -> const u8[]?
+    func resolve(request: const EntityRequest*) -> const u8[]?
 
 ## A listener that ignores every event and resolves nothing: parsing with it checks that
 ## a document is well-formed.
@@ -207,13 +207,13 @@ pub struct Checker: Listener:
     var events: usize = 0
 
     ## Count the event, and nothing else.
-    pub mutating func event(event: Event) -> !:
-        discard(event)
+    pub func event(event: Event) -> !:
+        _ = event
         self.events += 1
 
     ## Read no entity.
-    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
-        discard(request)
+    pub func resolve(request: const EntityRequest*) -> const u8[]?:
+        _ = request
         return none
 
 # mark: Options ===============================================================================
@@ -238,5 +238,5 @@ pub struct Options:
 ## document) to `sink`.
 pub func describe(failure: const ParseError*, sink: io.Writer) -> !:
     if failure.entity.length > 0:
-        discard(try sink.write(f"{failure.entity}:"))
-    discard(try sink.write(f"{failure.position.line}:{failure.position.column}: {failure.message}"))
+        _ = try sink.write(f"{failure.entity}:")
+    _ = try sink.write(f"{failure.position.line}:{failure.position.column}: {failure.message}")

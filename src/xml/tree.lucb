@@ -56,7 +56,7 @@ pub struct Document:
 
     ## Parse `source` into this document, replacing what it held. Fails as
     ## `Parser.parse` does, `failure` saying where and why.
-    pub mutating func load(source: const u8[]) -> !:
+    pub func load(source: const u8[]) -> !:
         self.clear()
         var builder = TreeBuilder(document = &self)
         defer builder.release()
@@ -111,7 +111,7 @@ pub struct Document:
     pub func text_content(index: u32, sink: io.Writer) -> !:
         let node = &self.nodes.items[index]
         if node.kind == NodeKind.text or node.kind == NodeKind.cdata:
-            discard(try sink.write(node.value.bytes))
+            _ = try sink.write(node.value.bytes)
             return
         if node.kind != NodeKind.element and node.kind != NodeKind.document:
             return
@@ -119,21 +119,21 @@ pub struct Document:
         while current != 0:
             let child = &self.nodes.items[current]
             if child.kind == NodeKind.text or child.kind == NodeKind.cdata:
-                discard(try sink.write(child.value.bytes))
+                _ = try sink.write(child.value.bytes)
             if child.first_child != 0:
                 current = child.first_child
                 continue
             current = following(&self, current, index)
 
     ## Free everything the document holds.
-    pub mutating func release():
+    pub func release():
         self.clear()
         self.nodes.release()
         self.attribute_list.release()
         self.notation_list.release()
         self.parser.release()
 
-    mutating func clear():
+    func clear():
         self.nodes.used = 0
         self.attribute_list.used = 0
         self.notation_list.used = 0

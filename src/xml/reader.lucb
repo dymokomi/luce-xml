@@ -160,7 +160,7 @@ struct Reader:
     var expanded: usize = 0
 
     ## Free everything the reader allocated.
-    mutating func release():
+    func release():
         self.arena.release()
         self.frames.release()
         self.entities.release()
@@ -217,7 +217,7 @@ struct Reader:
         let frame = &self.frames.items[self.frames.used - 1]
         return frame.pos >= frame.text.length
 
-    mutating func advance(count: usize):
+    func advance(count: usize):
         self.frames.items[self.frames.used - 1].pos += count
 
     ## The top frame's position.
@@ -225,7 +225,7 @@ struct Reader:
         return self.frames.items[self.frames.used - 1].pos
 
     ## Move the top frame's position back to `pos` (for an error's position).
-    mutating func rewind(pos: usize):
+    func rewind(pos: usize):
         self.frames.items[self.frames.used - 1].pos = pos
 
     ## The top frame's text from `start` to the position.
@@ -234,7 +234,7 @@ struct Reader:
         return (str)frame.text.bytes[start..<frame.pos]
 
     ## Skip white space; answer whether there was any.
-    mutating func skip_spaces() -> bool:
+    func skip_spaces() -> bool:
         let frame = &self.frames.items[self.frames.used - 1]
         let start = frame.pos
         while frame.pos < frame.text.length and is_space(frame.text.bytes[frame.pos]):
@@ -242,7 +242,7 @@ struct Reader:
         return frame.pos > start
 
     ## Step over `expected` if the top frame continues with it.
-    mutating func accept(expected: str) -> bool:
+    func accept(expected: str) -> bool:
         if self.looking_at(expected):
             self.advance(expected.length)
             return true
@@ -256,7 +256,7 @@ struct Reader:
         return decode_utf8(frame.text.bytes, frame.pos)
 
     ## A `Name` ([5]) at the position, or "" if none starts there.
-    mutating func scan_name() -> str:
+    func scan_name() -> str:
         let start = self.position()
         let (first, first_size) = self.scalar()
         if first_size == 0 or not is_name_start(first):
@@ -270,7 +270,7 @@ struct Reader:
         return self.since(start)
 
     ## An `Nmtoken` ([7]) at the position, or "" if none starts there.
-    mutating func scan_nmtoken() -> str:
+    func scan_nmtoken() -> str:
         let start = self.position()
         while true:
             let (next, size) = self.scalar()
@@ -283,11 +283,11 @@ struct Reader:
 
     ## Record a well-formedness error at the position and answer its message, for
     ## `error(malformed, ...)`.
-    mutating func complain(message: fmt) -> str!:
+    func complain(message: fmt) -> str!:
         return try self.report(malformed, message)
 
     ## Record an error with `code` at the position and answer its message.
-    mutating func report(code: ErrorCode, message: fmt, encoding: str = "") -> str!:
+    func report(code: ErrorCode, message: fmt, encoding: str = "") -> str!:
         var index = self.frames.used - 1
         while index > 0 and not self.frames.items[index].external:
             index -= 1
@@ -304,9 +304,9 @@ struct Reader:
         let encoding_end = storage.used
         try storage.add_all(frame.system_id.bytes)
         let entity_end = storage.used
-        discard(try storage.write(f"{position.line}:{position.column}: "))
+        _ = try storage.write(f"{position.line}:{position.column}: ")
         let message_start = storage.used
-        discard(try storage.write(message))
+        _ = try storage.write(message)
         let all = storage.view()
         self.parser.failure = ParseError(code = code, position = position, message = (str)all.bytes[message_start..],
                                          entity = (str)all.bytes[encoding_end..<entity_end], encoding = (str)all.bytes[..<encoding_end])

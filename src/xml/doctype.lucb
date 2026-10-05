@@ -38,13 +38,13 @@ func read_doctype(reader: Reader*) -> !:
         reader.doctype.public_id = public_id
         reader.doctype.system_id = system_id
         reader.external_subset = true
-        discard(reader.skip_spaces())
+        _ = reader.skip_spaces()
     if reader.accept("["):
         let start = reader.position()
         try read_declarations(reader, 0, true)
         reader.doctype.internal_subset = reader.since(start)
         reader.advance(1)
-        discard(reader.skip_spaces())
+        _ = reader.skip_spaces()
     if not reader.accept(">"):
         error(malformed, try reader.complain("expected '>' to end the DOCTYPE"))
     if let system_id = reader.doctype.system_id:
@@ -63,7 +63,7 @@ func read_doctype(reader: Reader*) -> !:
 ## subset when `internal`, else to the end of the external subset.
 func read_declarations(reader: Reader*, base: usize, internal: bool) -> !:
     while true:
-        discard(reader.skip_spaces())
+        _ = reader.skip_spaces()
         if reader.at_end():
             if reader.top() > base:
                 end_parameter_entity(reader)
@@ -78,7 +78,7 @@ func read_declarations(reader: Reader*, base: usize, internal: bool) -> !:
         if byte == ']' and internal and reader.top() == base:
             return
         if byte == '%':
-            discard(try enter_parameter(reader))
+            _ = try enter_parameter(reader)
         elif reader.looking_at("<!ELEMENT"):
             try read_element_declaration(reader)
         elif reader.looking_at("<!ATTLIST"):
@@ -88,9 +88,9 @@ func read_declarations(reader: Reader*, base: usize, internal: bool) -> !:
         elif reader.looking_at("<!NOTATION"):
             try read_notation(reader)
         elif reader.looking_at("<!--"):
-            discard(try read_comment(reader))
+            _ = try read_comment(reader)
         elif reader.looking_at("<?"):
-            discard(try read_processing_instruction(reader))
+            _ = try read_processing_instruction(reader)
         elif reader.looking_at("<![") and in_external:
             try read_conditional_section(reader)
         elif reader.looking_at("]]>") and in_external and reader.includes > 0:
@@ -152,7 +152,7 @@ func dtd_space(reader: Reader*, floor: usize) -> bool!:
                 return spaced
             if not reader.frames.items[reader.top()].in_external:
                 error(malformed, try reader.complain("a parameter-entity reference cannot stand inside a declaration in the internal subset"))
-            discard(try enter_parameter(reader))
+            _ = try enter_parameter(reader)
             spaced = true
             continue
         return spaced
@@ -172,7 +172,7 @@ func require_space(reader: Reader*, floor: usize, what: str) -> !:
 
 ## A `>` ending a declaration begun in frame `floor`, after optional white space.
 func end_declaration(reader: Reader*, floor: usize, what: str) -> !:
-    discard(try dtd_space(reader, floor))
+    _ = try dtd_space(reader, floor)
     if not reader.accept(">"):
         error(malformed, try reader.complain(f"expected '>' to end the {what} declaration"))
 
@@ -182,9 +182,9 @@ func end_declaration(reader: Reader*, floor: usize, what: str) -> !:
 func read_conditional_section(reader: Reader*) -> !:
     let floor = reader.top()
     reader.advance(3)
-    discard(try dtd_space(reader, floor))
+    _ = try dtd_space(reader, floor)
     let keyword = reader.scan_name()
-    discard(try dtd_space(reader, floor))
+    _ = try dtd_space(reader, floor)
     if not reader.accept("["):
         error(malformed, try reader.complain("expected '[' after the conditional section's keyword"))
     if keyword == "INCLUDE":
@@ -232,7 +232,7 @@ func read_public_id(reader: Reader*) -> str!:
     var plain = true
     for (index, byte) in literal.bytes.indexed():
         if not is_pubid_char(byte):
-            error(malformed, try reader.complain(f"the public identifier holds the character #x{hex(byte)}, which it may not"))
+            error(malformed, try reader.complain(f"the public identifier holds the character #x{byte:x}, which it may not"))
         if byte == '\n' or byte == '\r' or (byte == ' ' and (index == 0 or index + 1 == literal.length or literal.bytes[index + 1] == ' ')):
             plain = false
     if plain:

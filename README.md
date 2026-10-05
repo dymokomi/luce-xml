@@ -12,7 +12,7 @@ from luce_xml import xml
 struct Printer: xml.Listener:
     var elements: usize = 0
 
-    pub mutating func event(event: xml.Event) -> !:
+    pub func event(event: xml.Event) -> !:
         match event:
             .element_start(element):
                 self.elements += 1
@@ -22,8 +22,8 @@ struct Printer: xml.Listener:
             _:
                 return
 
-    pub mutating func resolve(request: const xml.EntityRequest*) -> const u8[]?:
-        discard(request)
+    pub func resolve(request: const xml.EntityRequest*) -> const u8[]?:
+        _ = request
         return none
 
 var parser = xml.Parser()

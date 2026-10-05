@@ -23,19 +23,19 @@ pub struct Parser:
     ## already UTF-8 under `Options.assume_utf8`), sending its events to `listener`.
     ## Fails with `malformed`, `unsupported_encoding` or `limit` (then `failure` says
     ## where and why), or with the listener's own failure.
-    pub mutating func parse(source: const u8[], listener: Listener) -> !:
+    pub func parse(source: const u8[], listener: Listener) -> !:
         self.failure = none
         var reader = Reader(listener = listener, options = self.options, parser = &self)
         defer reader.release()
         read_document(&reader, source) catch problem:
             if let found = self.failure:
                 reader.listener.event(.parse_error(&found)) catch ignored:
-                    discard(ignored)
+                    _ = ignored
                     recover ()
             error(problem.code, problem.message)
 
     ## Free the storage `failure` refers to.
-    pub mutating func release():
+    pub func release():
         self.failure = none
         self.storage.release()
 
@@ -46,7 +46,7 @@ pub func check(source: const u8[]) -> bool:
     defer parser.release()
     var checker = Checker()
     parser.parse(source, &checker) catch problem:
-        discard(problem)
+        _ = problem
         return false
     return true
 
@@ -84,7 +84,7 @@ func read_document(reader: Reader*, source: const u8[]) -> !:
 func read_misc(reader: Reader*) -> !:
     while not reader.at_end():
         if is_space(reader.peek()):
-            discard(reader.skip_spaces())
+            _ = reader.skip_spaces()
         elif reader.looking_at("<!--"):
             let comment = try read_comment(reader)
             try reader.listener.event(.comment(comment))
@@ -140,7 +140,7 @@ func read_xml_declaration(reader: Reader*, document: bool) -> !:
             error(malformed, try reader.complain("standalone must be \"yes\" or \"no\""))
         reader.declaration.standalone = standalone == "yes"
         reader.standalone = standalone == "yes"
-        discard(reader.skip_spaces())
+        _ = reader.skip_spaces()
     if not reader.accept("?>"):
         if document:
             error(malformed, try reader.complain("expected '?>' to end the XML declaration"))
@@ -148,10 +148,10 @@ func read_xml_declaration(reader: Reader*, document: bool) -> !:
 
 ## `Eq` and a quoted value, after a pseudo-attribute's name.
 func read_equals_value(reader: Reader*, what: str) -> str!:
-    discard(reader.skip_spaces())
+    _ = reader.skip_spaces()
     if not reader.accept("="):
         error(malformed, try reader.complain(f"expected '=' after '{what}'"))
-    discard(reader.skip_spaces())
+    _ = reader.skip_spaces()
     return try read_quoted(reader, what)
 
 ## VersionNum ::= '1.' [0-9]+ ([26]).

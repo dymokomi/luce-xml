@@ -19,6 +19,7 @@
 import c
 import memory
 import xml
+import strings
 
 extern func fopen(path: c.str, mode: c.str) -> void*?
 extern func fclose(file: void*) -> i32
@@ -33,12 +34,12 @@ struct Buffer:
     var items: u8[]
     var used: usize = 0
 
-    mutating func add_all(data: const u8[]) -> !:
+    func add_all(data: const u8[]) -> !:
         if self.used + data.length > self.items.length:
             var size = 256 if self.items.length == 0 else self.items.length * 2
             while size < self.used + data.length:
                 size *= 2
-            let larger = try alloc u8[size] in memory.heap
+            let larger = try new u8[size] --- in memory.heap
             memory.copy(larger, self.items, self.used)
             if self.items.length > 0:
                 free(self.items) in memory.heap
@@ -46,7 +47,7 @@ struct Buffer:
         memory.copy(self.items[self.used..], data, data.length)
         self.used += data.length
 
-    mutating func add(byte: u8) -> !:
+    func add(byte: u8) -> !:
         var one: u8[1]
         one[0] = byte
         try self.add_all(one)
@@ -54,7 +55,7 @@ struct Buffer:
     func view() -> u8[]:
         return self.items[..<self.used]
 
-    mutating func release():
+    func release():
         if self.items.length > 0:
             free(self.items) in memory.heap
         var empty: u8[]
@@ -66,13 +67,13 @@ func read_file(path: str) -> u8[]?:
     var name = Buffer()
     defer name.release()
     name.add_all(path.bytes) catch failure:
-        discard(failure)
+        _ = failure
         return none
     name.add(0) catch failure:
-        discard(failure)
+        _ = failure
         return none
     let file = fopen((c.str)(str)name.view(), "rb") else return none
-    defer discard(fclose(file))
+    defer _ = fclose(file)
     var contents = Buffer()
     var chunk: u8[65536]
     while true:
@@ -80,11 +81,11 @@ func read_file(path: str) -> u8[]?:
         if count == 0:
             break
         contents.add_all(chunk[..<count]) catch failure:
-            discard(failure)
+            _ = failure
             contents.release()
             return none
     defer contents.release()
-    let exact = (alloc u8[contents.used] in memory.heap) else return none
+    let exact = (new u8[contents.used] --- in memory.heap) else return none
     memory.copy(exact, contents.items, contents.used)
     return exact
 
@@ -96,8 +97,8 @@ func write_file(path: str, data: const u8[]) -> !:
     try name.add(0)
     let file = fopen((c.str)(str)name.view(), "wb") else error(memory.exhausted, "cannot write a file")
     if data.length > 0:
-        discard(fwrite(&data[0], 1, data.length, file))
-    discard(fclose(file))
+        _ = fwrite(&data[0], 1, data.length, file)
+    _ = fclose(file)
 
 ## The directory part of `path`, with its slash; "" if it has none.
 func directory_of(path: str) -> str:
@@ -128,7 +129,7 @@ struct Canonical: xml.Listener:
     var quiet: bool = false
     var order: usize[1024]
 
-    pub mutating func event(event: xml.Event) -> !:
+    pub func event(event: xml.Event) -> !:
         if self.quiet:
             return
         match event:
@@ -156,7 +157,7 @@ struct Canonical: xml.Listener:
             _:
                 return
 
-    pub mutating func resolve(request: const xml.EntityRequest*) -> const u8[]?:
+    pub func resolve(request: const xml.EntityRequest*) -> const u8[]?:
         if request.kind == xml.EntityKind.named or not self.externals:
             return none
         var base = self.directory
@@ -167,10 +168,10 @@ struct Canonical: xml.Listener:
             return none
         let start = self.paths.used
         self.paths.add_all(base.bytes) catch failure:
-            discard(failure)
+            _ = failure
             return none
         self.paths.add_all(request.system_id.bytes) catch failure:
-            discard(failure)
+            _ = failure
             return none
         let path = (str)self.paths.items[start..<self.paths.used]
         let bytes = read_file(path) else return none
@@ -179,7 +180,7 @@ struct Canonical: xml.Listener:
         return bytes
 
     ## The attributes sorted by name, as the canonical form has them.
-    mutating func attributes(attributes: const xml.Attribute[]) -> !:
+    func attributes(attributes: const xml.Attribute[]) -> !:
         let count = attributes.length if attributes.length < 1024 else 1024
         for index in 0..<count:
             self.order[index] = index
@@ -199,7 +200,7 @@ struct Canonical: xml.Listener:
             try self.out.add('"')
 
     ## The second canonical form's DOCTYPE, when the DTD declares notations.
-    mutating func notations(doctype: const xml.Doctype*) -> !:
+    func notations(doctype: const xml.Doctype*) -> !:
         if doctype.notations.length == 0:
             return
         try self.out.add_all("<!DOCTYPE ".bytes)
@@ -236,7 +237,7 @@ struct Canonical: xml.Listener:
             try self.out.add_all(">\n".bytes)
         try self.out.add_all("]>\n".bytes)
 
-    mutating func escaped(text: str) -> !:
+    func escaped(text: str) -> !:
         for byte in text.bytes:
             if byte == '&':
                 try self.out.add_all("&amp;".bytes)
@@ -255,12 +256,12 @@ struct Canonical: xml.Listener:
             else:
                 try self.out.add(byte)
 
-    mutating func release():
+    func release():
         self.reset()
         self.out.release()
         self.paths.release()
 
-    mutating func reset():
+    func reset():
         for index in 0..<self.loaded_count:
             free(self.loaded[index].bytes) in memory.heap
         self.loaded_count = 0
@@ -308,7 +309,7 @@ func run_job(number: usize, flags: str, path: str, directory: str, canonical: Ca
     defer target.release()
     try target.add_all(directory.bytes)
     var digits: u8[24]
-    let name = try format(digits, f"/{number}.xml")
+    let name = try strings.format(digits, f"/{number}.xml")
     try target.add_all(name.bytes)
     try write_file((str)target.view(), canonical.out.view())
     print(f"{number} ok")
@@ -337,6 +338,6 @@ pub func main(arguments: str[]) -> i32!:
         if space >= line.length:
             continue
         try run_job(number, (str)line.bytes[..<space], (str)line.bytes[space + 1..], arguments[2], &canonical, &parser)
-        discard(fflush(none))
+        _ = fflush(none)
         number += 1
     return 0

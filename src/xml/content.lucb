@@ -87,7 +87,7 @@ func read_end_tag(reader: Reader*) -> !:
     let found = reader.scan_name()
     if found.length == 0:
         error(malformed, try reader.complain("expected an element name after '</'"))
-    discard(reader.skip_spaces())
+    _ = reader.skip_spaces()
     if not reader.accept(">"):
         error(malformed, try reader.complain(f"expected '>' to end the end tag </{found}>"))
     let open = reader.open.items[reader.open.used - 1]

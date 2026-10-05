@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-xml" {
     str owner = "dymokomi"
-    str version = "0.1.0"
+    str version = "0.2.0"
     str kind = "package"
     str language = "luce-base"
     str description = "A conforming, non-validating XML 1.0 + Namespaces parser for Luce/Base: a streaming listener interface and a small document tree."

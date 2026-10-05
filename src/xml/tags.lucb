@@ -44,10 +44,10 @@ func read_start_tag(reader: Reader*) -> !:
         let attribute = reader.scan_name()
         if attribute.length == 0:
             error(malformed, try reader.complain(f"expected an attribute name, '>' or '/>' in <{qualified}>"))
-        discard(reader.skip_spaces())
+        _ = reader.skip_spaces()
         if not reader.accept("="):
             error(malformed, try reader.complain(f"expected '=' after the attribute name '{attribute}'"))
-        discard(reader.skip_spaces())
+        _ = reader.skip_spaces()
         try read_attribute_value(reader, attribute)
     try check_unique(reader, qualified)
     try apply_declarations(reader, qualified)

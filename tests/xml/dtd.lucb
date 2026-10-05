@@ -94,15 +94,15 @@ test "parameter entities inside declarations in the external subset":
 struct SubsetKeeper: Listener:
     var subset: Bytes = Bytes()
 
-    pub mutating func event(event: Event) -> !:
+    pub func event(event: Event) -> !:
         match event:
             .doctype(doctype):
                 try self.subset.add_all(doctype.internal_subset.bytes)
             _:
                 return
 
-    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
-        discard(request)
+    pub func resolve(request: const EntityRequest*) -> const u8[]?:
+        _ = request
         return none
 
 test "a standalone document must declare its entities in the internal subset":

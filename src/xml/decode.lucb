@@ -162,7 +162,7 @@ func normalize(reader: Reader*, text: str, document: bool, system_id: str) -> st
         if byte < 0x80:
             if byte < 0x20 and byte != '\t' and byte != '\n' and byte != '\r':
                 try push_raw(reader, (str)data[..<index], system_id)
-                error(malformed, try reader.complain(f"the control character #x{hex(byte)} is not allowed in XML"))
+                error(malformed, try reader.complain(f"the control character #x{byte:x} is not allowed in XML"))
             carriage = carriage or byte == '\r'
             index += 1
             continue
@@ -173,7 +173,7 @@ func normalize(reader: Reader*, text: str, document: bool, system_id: str) -> st
         let (scalar, _) = decode_utf8(data, index)
         if not is_char(scalar):
             try push_raw(reader, (str)data[..<index], system_id)
-            error(malformed, try reader.complain(f"the character #x{hex(scalar)} is not allowed in XML"))
+            error(malformed, try reader.complain(f"the character #x{scalar:x} is not allowed in XML"))
         index += size
     if not carriage:
         return text

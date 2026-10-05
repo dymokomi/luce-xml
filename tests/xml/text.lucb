@@ -51,14 +51,14 @@ test "processing instructions":
 struct TextCounter: Listener:
     var texts: usize = 0
 
-    pub mutating func event(event: Event) -> !:
+    pub func event(event: Event) -> !:
         match event:
             .text(text):
-                discard(text)
+                _ = text
                 self.texts += 1
             _:
                 return
 
-    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
-        discard(request)
+    pub func resolve(request: const EntityRequest*) -> const u8[]?:
+        _ = request
         return none

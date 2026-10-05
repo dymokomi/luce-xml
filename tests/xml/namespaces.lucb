@@ -53,7 +53,7 @@ test "namespaces off: names as written, no constraints":
 struct NameCheck: Listener:
     var checked: usize = 0
 
-    pub mutating func event(event: Event) -> !:
+    pub func event(event: Event) -> !:
         match event:
             .element_start(element):
                 assert(element.name.qualified == "p:a" and element.name.prefix == "p" and element.name.local_name == "a")
@@ -67,6 +67,6 @@ struct NameCheck: Listener:
             _:
                 return
 
-    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
-        discard(request)
+    pub func resolve(request: const EntityRequest*) -> const u8[]?:
+        _ = request
         return none

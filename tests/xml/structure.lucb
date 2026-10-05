@@ -41,7 +41,7 @@ test "the error's byte offset counts the original line ends and byte order mark"
     defer parser.release()
     var checker = Checker()
     parser.parse("\u{FEFF}<a>\r\n\r\n</b>".bytes, &checker) catch failure:
-        discard(failure)
+        _ = failure
     let found = parser.failure else trap("the parse should fail")
     assert(found.position.line == 3)
     assert(found.position.column == 1)
@@ -65,16 +65,16 @@ test "check answers whether a document is well-formed":
 struct Refusing: Listener:
     var seen: usize = 0
 
-    pub mutating func event(event: Event) -> !:
+    pub func event(event: Event) -> !:
         match event:
             .element_end(name):
-                discard(name)
+                _ = name
                 error(refused, "no ends wanted")
             _:
                 self.seen += 1
 
-    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
-        discard(request)
+    pub func resolve(request: const EntityRequest*) -> const u8[]?:
+        _ = request
         return none
 
 let refused: ErrorCode = ErrorCode.package(90)
@@ -91,7 +91,7 @@ test "describe writes the position and the message":
     defer parser.release()
     var checker = Checker()
     parser.parse("<a>\n</b>".bytes, &checker) catch failure:
-        discard(failure)
+        _ = failure
     let found = parser.failure else trap("the parse should fail")
     var text = Bytes()
     defer text.release()
@@ -102,7 +102,7 @@ test "describe writes the position and the message":
 struct Finder: Listener:
     var found: usize = 0
 
-    pub mutating func event(event: Event) -> !:
+    pub func event(event: Event) -> !:
         match event:
             .element_start(element):
                 if element.attribute("x") == "1":
@@ -113,6 +113,6 @@ struct Finder: Listener:
             _:
                 return
 
-    pub mutating func resolve(request: const EntityRequest*) -> const u8[]?:
-        discard(request)
+    pub func resolve(request: const EntityRequest*) -> const u8[]?:
+        _ = request
         return none

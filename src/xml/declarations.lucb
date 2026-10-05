@@ -99,7 +99,7 @@ func read_entity_value_text(reader: Reader*, quote: u8) -> !:
                 try reader.literal.add_scalar(try read_char_reference(reader))
             else:
                 let start = reader.position()
-                discard(try read_entity_name(reader))
+                _ = try read_entity_name(reader)
                 try reader.literal.add_all(reader.since(start).bytes)
         else:
             try reader.literal.add(byte)
@@ -147,11 +147,11 @@ func read_attribute_type(reader: Reader*, floor: usize) -> bool!:
     if not reader.accept("("):
         error(malformed, try reader.complain("expected an attribute type"))
     while true:
-        discard(try dtd_space(reader, floor))
+        _ = try dtd_space(reader, floor)
         let token = reader.scan_name() if notation else reader.scan_nmtoken()
         if token.length == 0:
             error(malformed, try reader.complain("expected a name in the enumeration"))
-        discard(try dtd_space(reader, floor))
+        _ = try dtd_space(reader, floor)
         if reader.accept(")"):
             return false
         if not reader.accept("|"):
@@ -197,14 +197,14 @@ func read_element_declaration(reader: Reader*) -> !:
     let floor = reader.top()
     reader.advance(9)
     try require_space(reader, floor, "the element's name")
-    discard(try expect_name(reader, "the element's name"))
+    _ = try expect_name(reader, "the element's name")
     try require_space(reader, floor, "the content specification")
     if reader.accept("EMPTY") or reader.accept("ANY"):
         try end_declaration(reader, floor, "element")
         return
     if not reader.accept("("):
         error(malformed, try reader.complain("expected EMPTY, ANY or a content model in '('"))
-    discard(try dtd_space(reader, floor))
+    _ = try dtd_space(reader, floor)
     if reader.accept("#PCDATA"):
         try read_mixed(reader, floor)
     else:
@@ -215,17 +215,17 @@ func read_element_declaration(reader: Reader*) -> !:
 func read_mixed(reader: Reader*, floor: usize) -> !:
     var names = false
     while true:
-        discard(try dtd_space(reader, floor))
+        _ = try dtd_space(reader, floor)
         if reader.accept(")"):
             if names and not reader.accept("*"):
                 error(malformed, try reader.complain("mixed content with element names must end with ')*'"))
             if not names:
-                discard(reader.accept("*"))
+                _ = reader.accept("*")
             return
         if not reader.accept("|"):
             error(malformed, try reader.complain("expected '|' or ')' in mixed content"))
-        discard(try dtd_space(reader, floor))
-        discard(try expect_name(reader, "an element name"))
+        _ = try dtd_space(reader, floor)
+        _ = try expect_name(reader, "an element name")
         names = true
 
 ## The rest of a choice or sequence ([49], [50]) after its `(`; `depth` counts groups.
@@ -235,7 +235,7 @@ func read_group(reader: Reader*, floor: usize, depth: usize) -> !:
     try read_particle(reader, floor, depth)
     var separator: u8 = 0
     while true:
-        discard(try dtd_space(reader, floor))
+        _ = try dtd_space(reader, floor)
         if reader.accept(")"):
             break
         let byte = reader.peek()
@@ -245,17 +245,17 @@ func read_group(reader: Reader*, floor: usize, depth: usize) -> !:
             error(malformed, try reader.complain("a content model group cannot mix '|' and ','"))
         separator = byte
         reader.advance(1)
-        discard(try dtd_space(reader, floor))
+        _ = try dtd_space(reader, floor)
         try read_particle(reader, floor, depth)
     read_occurrence(reader)
 
 ## A content particle ([48]): a name or a group, with its occurrence.
 func read_particle(reader: Reader*, floor: usize, depth: usize) -> !:
     if reader.accept("("):
-        discard(try dtd_space(reader, floor))
+        _ = try dtd_space(reader, floor)
         try read_group(reader, floor, depth + 1)
         return
-    discard(try expect_name(reader, "an element name or '(' in the content model"))
+    _ = try expect_name(reader, "an element name or '(' in the content model")
     read_occurrence(reader)
 
 ## `?`, `*` or `+` after a particle, if there.
