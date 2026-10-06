@@ -10,18 +10,20 @@ jobs:
       fail-fast: false
       matrix:
         runner: [macos-15, ubuntu-24.04]
-        base: [pinned, main]
     steps:
       - uses: actions/checkout@v7
         with:
           path: luce-xml
-      - id: pins
-        run: echo "base=$([ '${{ matrix.base }}' = main ] && echo main || cat luce-xml/bootstrap/BASE)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v7
         with:
           repository: dymokomi/luce-base
-          ref: ${{ steps.pins.outputs.base }}
           path: luce-base
+      # every dependency at main, beside this checkout (luce-base docs/CI.md)
+      - name: Check out dependencies at main
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 luce-base/tools/checkout_main.py luce-xml
       - name: Select Clang
         run: |
           mkdir -p "$RUNNER_TEMP/luce-bin"

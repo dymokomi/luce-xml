@@ -201,8 +201,8 @@ is in the document itself are rejected.
 `TESTS` lists: structure, text and references, the DTD, entities, namespaces, encodings,
 limits, the tree) in native and C modes, checks the sources with `-W` and their
 formatting, and builds the tools, with the compiler `LUCE_BASE` names and each one
-`LUCE_BASE_EXTRA` lists (colon-separated), so one run covers the pinned toolchain
-(`bootstrap/BASE`) and luce-base main.
+`LUCE_BASE_EXTRA` lists (colon-separated), so one run can cover a released toolchain
+and luce-base main.
 
 `tools/fuzz.py` checks robustness: it mutates the suite's documents and the entities
 beside them (bytes flipped, inserted, deleted, repeated, spliced from other documents,
