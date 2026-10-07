@@ -197,12 +197,10 @@ is in the document itself are rejected.
 
 ## Tests
 
-`./test.sh` builds and runs the unit tests (`tests/xml/`, test fragments the module's
+`luc test` builds and runs the unit tests (`tests/xml/`, test fragments the module's
 `TESTS` lists: structure, text and references, the DTD, entities, namespaces, encodings,
-limits, the tree) in native and C modes, checks the sources with `-W` and their
-formatting, and builds the tools, with the compiler `LUCE_BASE` names and each one
-`LUCE_BASE_EXTRA` lists (colon-separated), so one run can cover a released toolchain
-and luce-base main.
+limits, the tree) and the program `tests/tools`, which builds `tools/xmlconf`.
+`tools/check.sh` checks the sources with `-W` and their formatting.
 
 `tools/fuzz.py` checks robustness: it mutates the suite's documents and the entities
 beside them (bytes flipped, inserted, deleted, repeated, spliced from other documents,
